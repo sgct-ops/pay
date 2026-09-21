@@ -1,0 +1,9 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "framework": "nextjs",
+  "regions": ["bom1"],
+  "github": {
+    "silent": false,
+    "autoJobCancelation": true
+  }
+}

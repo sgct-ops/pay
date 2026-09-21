@@ -1,0 +1,32 @@
+# Runs on every push. Vercel deploys in parallel from its own Git integration;
+# this is the part that tells you whether what just deployed is actually sound.
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      # The transform is the part where a mistake sends money to the wrong
+      # handle, so it is checked before anything else.
+      - name: Return Prime transform
+        run: npm test
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Build
+        run: npm run build

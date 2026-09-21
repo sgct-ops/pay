@@ -7,6 +7,13 @@ import { QrCode } from "@/components/QrCode";
 import { InstallHint } from "@/components/InstallHint";
 import { isUpiHandle, noteFor, noteProblem, upiLink, NOTE_TAG } from "@/lib/upi";
 import { money } from "@/lib/format";
+import {
+  UPI_APPS,
+  linkForApp,
+  readPreferredApp,
+  writePreferredApp,
+  type UpiApp,
+} from "@/lib/upi-apps";
 import type { StoredOrder } from "@/lib/sheet/types";
 
 export function PayDesk() {
@@ -19,6 +26,10 @@ export function PayDesk() {
   const phoneCanvas = useRef<HTMLCanvasElement>(null);
 
   const [copiedAt, setCopiedAt] = useState(-1);
+  // Which UPI app the phone opens. Remembered, because paying twenty refunds
+  // through the same app should not mean twenty trips through a chooser.
+  const [upiApp, setUpiApp] = useState<UpiApp>(readPreferredApp);
+  const [pickingApp, setPickingApp] = useState(false);
   const [showQueue, setShowQueue] = useState(false);
   const [failing, setFailing] = useState(false);
 
@@ -72,7 +83,7 @@ export function PayDesk() {
           One screen, nothing to scroll. The order across the screen follows the
           order of the job: who and how much, then the QR, then the button that
           actually moves the money, then where you are in the run. */}
-      <div className="flex h-full flex-col gap-2.5 lg:hidden">
+      <div className="flex h-full flex-col gap-3 lg:hidden">
         {!current ? (
           <EmptyDesk role={role} />
         ) : (
@@ -131,36 +142,53 @@ export function PayDesk() {
               </div>
             </div>
 
-            {/* The QR takes whatever height is left and no more — that is what
-                keeps a whole payout on one screen. */}
-            <div className="min-h-0 flex-1">
+            {/* Small on purpose: on the phone you are holding, the QR is
+                only for handing the payment to another device. The space is
+                better spent on targets big enough not to misfire. */}
+            <div className="flex max-h-[38vh] min-h-0 flex-1 items-center justify-center">
               <QrCode value={link} fluid disabled={!link} canvasRef={phoneCanvas} />
             </div>
 
             {!link && (
-              <p className="rounded-lg border border-clay/30 bg-clay-wash px-3 py-2 text-[12px] text-clay">
+              <p className="rounded-lg border border-clay/30 bg-clay-wash px-3 py-2.5 text-[12.5px] text-clay">
                 {problem ?? "This payee has no usable UPI handle."}
               </p>
             )}
 
-            <a
-              href={link || undefined}
-              aria-disabled={!link}
-              className={`rounded-lg py-3 text-center text-[15px] font-semibold transition ${
-                link
-                  ? "bg-spruce text-white active:bg-spruce-deep"
-                  : "pointer-events-none bg-sunk text-ink-3"
-              }`}
-            >
-              Open in UPI app
-            </a>
+            {/* Split button: the big half pays through the remembered app, the
+                narrow half changes it. */}
+            <div className="flex gap-2.5">
+              <a
+                href={link ? linkForApp(link, upiApp) : undefined}
+                aria-disabled={!link}
+                className={`flex h-14 flex-1 items-center justify-center rounded-xl text-[16px] font-semibold transition ${
+                  link
+                    ? "bg-spruce text-white shadow-[0_2px_0_#1d4632] active:translate-y-px active:shadow-none"
+                    : "pointer-events-none bg-sunk text-ink-3"
+                }`}
+              >
+                {upiApp.id === "any" ? "Open in UPI app" : `Pay with ${upiApp.name}`}
+              </a>
+              <button
+                onClick={() => setPickingApp(true)}
+                aria-label="Choose which UPI app to pay with"
+                className="grid h-14 w-14 shrink-0 place-items-center rounded-xl border border-line bg-card text-[13px] font-semibold text-ink-2 active:bg-sunk"
+              >
+                <span
+                  className="grid h-7 w-7 place-items-center rounded-full text-[12px] font-bold text-white"
+                  style={{ background: upiApp.tint }}
+                >
+                  {upiApp.letter}
+                </span>
+              </button>
+            </div>
 
-            <div className="flex gap-2">
+            <div className="flex gap-2.5">
               <button
                 onClick={() => step(-1)}
                 disabled={index === 0}
                 aria-label="Previous payout"
-                className="grid w-12 shrink-0 place-items-center rounded-lg border border-line bg-card text-ink-2 disabled:opacity-30"
+                className="grid h-14 w-14 shrink-0 place-items-center rounded-xl border border-line bg-card text-[18px] text-ink-2 active:bg-sunk disabled:opacity-25"
               >
                 ←
               </button>
@@ -170,10 +198,10 @@ export function PayDesk() {
                   void (paid ? setPaid(order, false) : markPaidAndAdvance());
                 }}
                 disabled={!order}
-                className={`flex-1 rounded-lg py-3 text-[14px] font-semibold transition disabled:opacity-40 ${
+                className={`h-14 flex-1 rounded-xl text-[15px] font-semibold transition disabled:opacity-40 ${
                   paid
-                    ? "border border-line bg-card text-ink-2"
-                    : "border border-spruce/30 bg-spruce-wash text-spruce"
+                    ? "border border-line bg-card text-ink-2 active:bg-sunk"
+                    : "border-2 border-spruce bg-spruce-wash text-spruce active:bg-spruce active:text-white"
                 }`}
               >
                 {paid ? "Undo paid" : queue.length > 1 ? "Mark paid & next →" : "Mark paid"}
@@ -182,26 +210,33 @@ export function PayDesk() {
                 onClick={() => step(1)}
                 disabled={index >= queue.length - 1}
                 aria-label="Next payout"
-                className="grid w-12 shrink-0 place-items-center rounded-lg border border-line bg-card text-ink-2 disabled:opacity-30"
+                className="grid h-14 w-14 shrink-0 place-items-center rounded-xl border border-line bg-card text-[18px] text-ink-2 active:bg-sunk disabled:opacity-25"
               >
                 →
               </button>
             </div>
 
-            <div className="flex items-center justify-between gap-2 pb-1 text-[12px]">
-              <button onClick={saveQr} disabled={!link} className="text-ink-3 disabled:opacity-40">
+            <div className="flex gap-2.5 pb-1">
+              <button
+                onClick={saveQr}
+                disabled={!link}
+                className="h-11 flex-1 rounded-xl border border-line bg-card text-[13px] font-medium text-ink-2 active:bg-sunk disabled:opacity-40"
+              >
                 Save QR
               </button>
               <button
                 onClick={() => void copyLink()}
                 disabled={!link}
-                className="text-ink-3 disabled:opacity-40"
+                className="h-11 flex-1 rounded-xl border border-line bg-card text-[13px] font-medium text-ink-2 active:bg-sunk disabled:opacity-40"
               >
-                {copiedAt === index ? "Copied" : "Copy link"}
+                {copiedAt === index ? "Copied ✓" : "Copy link"}
               </button>
               {order && !current.adhoc && (
-                <button onClick={() => setFailing(true)} className="text-clay">
-                  Payment failed
+                <button
+                  onClick={() => setFailing(true)}
+                  className="h-11 flex-1 rounded-xl border border-clay/40 bg-card text-[13px] font-medium text-clay active:bg-clay-wash"
+                >
+                  Failed
                 </button>
               )}
             </div>
@@ -371,6 +406,18 @@ export function PayDesk() {
         </section>
       </div>
 
+      {pickingApp && (
+        <AppSheet
+          current={upiApp}
+          onPick={(app) => {
+            setUpiApp(app);
+            writePreferredApp(app.id);
+            setPickingApp(false);
+          }}
+          onClose={() => setPickingApp(false)}
+        />
+      )}
+
       {showQueue && (
         <QueueSheet
           queue={queue}
@@ -441,6 +488,55 @@ function ProgressBar({
       >
         Queue
       </button>
+    </div>
+  );
+}
+
+function AppSheet({
+  current,
+  onPick,
+  onClose,
+}: {
+  current: UpiApp;
+  onPick: (app: UpiApp) => void;
+  onClose: () => void;
+}) {
+  return (
+    <div className="fixed inset-0 z-40 flex flex-col justify-end bg-ink/30 lg:hidden">
+      <button className="flex-1" onClick={onClose} aria-label="Close" />
+      <div className="rounded-t-2xl border-t border-line bg-card pb-[env(safe-area-inset-bottom)]">
+        <div className="flex items-center justify-between border-b border-line-soft px-4 py-3">
+          <span className="display text-[14px] font-semibold text-ink">Pay with</span>
+          <button onClick={onClose} className="text-[13px] text-ink-3">
+            Close
+          </button>
+        </div>
+        <ul className="p-2">
+          {UPI_APPS.map((app) => (
+            <li key={app.id}>
+              <button
+                onClick={() => onPick(app)}
+                className={`flex w-full items-center gap-3 rounded-xl px-3 py-3.5 text-left transition active:bg-sunk ${
+                  current.id === app.id ? "bg-spruce-wash" : ""
+                }`}
+              >
+                <span
+                  className="grid h-9 w-9 shrink-0 place-items-center rounded-full text-[14px] font-bold text-white"
+                  style={{ background: app.tint }}
+                >
+                  {app.letter}
+                </span>
+                <span className="flex-1 text-[14px] text-ink">{app.name}</span>
+                {current.id === app.id && <span className="text-[14px] text-spruce">✓</span>}
+              </button>
+            </li>
+          ))}
+        </ul>
+        <p className="px-4 pb-4 text-[11.5px] leading-relaxed text-ink-3">
+          Remembered for next time. If the app you pick is not installed, nothing will happen —
+          come back here and choose <span className="text-ink-2">Any UPI app</span>.
+        </p>
+      </div>
     </div>
   );
 }

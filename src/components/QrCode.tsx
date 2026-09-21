@@ -49,8 +49,11 @@ export function QrCode({
       .catch((e: Error) => setError(e.message));
   }, [value, disabled, ref]);
 
+  // Fluid mode lets the canvas keep its own square aspect and simply clamps it
+  // with max-width/max-height. Percentage heights on a replaced element inside
+  // an auto-sized track resolve unpredictably and crop the code.
   const shell = fluid
-    ? "grid h-full w-full place-items-center rounded-lg border border-line bg-white p-2"
+    ? "flex aspect-square h-full max-w-full items-center justify-center rounded-xl border border-line bg-white p-2"
     : "grid place-items-center rounded-lg border border-line bg-white";
 
   return (
