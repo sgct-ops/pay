@@ -78,10 +78,11 @@ body {
   border-right: 1px dashed var(--color-line);
 }
 
-@media (max-width: 860px) {
+/* Stacked, the perforation sits above the stub rather than beside it. */
+@media (max-width: 1023px) {
   .perf {
     border-right: 0;
-    border-bottom: 1px dashed var(--color-line);
+    border-top: 1px dashed var(--color-line);
   }
 }
 

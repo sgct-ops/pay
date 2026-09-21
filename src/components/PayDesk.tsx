@@ -38,7 +38,7 @@ export function PayDesk() {
 
   return (
     <div className="grid gap-4 xl:grid-cols-[320px_minmax(0,1fr)]">
-      <aside className="space-y-4">
+      <aside className="order-2 space-y-4 xl:order-1">
         <AddPayee onAdd={(item) => push([item])} />
         <Queue
           queue={queue}
@@ -51,13 +51,16 @@ export function PayDesk() {
         <InstallHint compact />
       </aside>
 
-      <section className="rounded-card border border-line bg-card">
+      <section className="order-1 rounded-card border border-line bg-card xl:order-2">
         {!current ? (
           <EmptyDesk />
         ) : (
           <div className="grid lg:grid-cols-[286px_minmax(0,1fr)]">
-            {/* Stub: the QR and nothing else, so it stays scannable. */}
-            <div className="perf flex flex-col items-center justify-center gap-3 px-5 py-6">
+            {/* Stub: the QR and nothing else, so it stays scannable. On a
+                phone it drops below the payment details — you cannot scan the
+                screen you are holding, so the QR is for someone else's device
+                and the UPI link is what you actually press. */}
+            <div className="perf order-2 flex flex-col items-center justify-center gap-3 px-5 py-6 lg:order-1">
               <QrCode value={link} disabled={!link} canvasRef={canvasRef} size={224} />
               <p className="text-center text-[11.5px] leading-relaxed text-ink-3">
                 Scan with any UPI app.
@@ -70,7 +73,7 @@ export function PayDesk() {
 
             {/* Counterfoil: everything about the payment, beside the QR rather
                 than under it, so a full payout fits one screen. */}
-            <div className="flex flex-col gap-4 px-5 py-6">
+            <div className="order-1 flex w-full max-w-[620px] flex-col gap-4 px-5 py-6 lg:order-2">
               <div>
                 <div className="flex flex-wrap items-baseline gap-x-2">
                   <h2 className="display text-[17px] font-semibold text-ink">
@@ -161,7 +164,7 @@ export function PayDesk() {
                 <button
                   onClick={() => order && void setPaid(order, !paid)}
                   disabled={!order}
-                  className={`ml-auto rounded-lg px-4 py-2.5 text-[13px] font-semibold transition disabled:opacity-40 ${
+                  className={`rounded-lg px-4 py-2.5 text-[13px] font-semibold transition disabled:opacity-40 sm:ml-auto ${
                     paid
                       ? "border border-line bg-card text-ink-2 hover:border-clay hover:text-clay"
                       : "border border-spruce/30 bg-spruce-wash text-spruce hover:bg-spruce hover:text-white"
@@ -214,7 +217,7 @@ function Carousel({
 }) {
   return (
     <div className="rounded-lg border border-line bg-paper px-3 py-3">
-      <div className="flex items-center gap-2">
+      <div className="flex flex-wrap items-center gap-2">
         <button
           onClick={() => onStep(-1)}
           disabled={index === 0}
@@ -223,7 +226,7 @@ function Carousel({
         >
           ←
         </button>
-        <div className="tnum text-[12.5px] text-ink-2">
+        <div className="tnum whitespace-nowrap text-[12.5px] text-ink-2">
           <span className="font-semibold text-ink">{index + 1}</span> of {queue.length} ·{" "}
           {unpaidLeft} left
         </div>
@@ -238,7 +241,7 @@ function Carousel({
         <button
           onClick={onPaidNext}
           disabled={!canMark}
-          className="ml-auto rounded-lg bg-spruce px-3.5 py-2 text-[12.5px] font-semibold text-white transition hover:bg-spruce-deep disabled:opacity-40"
+          className="ml-auto whitespace-nowrap rounded-lg bg-spruce px-3.5 py-2 text-[12.5px] font-semibold text-white transition hover:bg-spruce-deep disabled:opacity-40"
         >
           Mark paid & next →
         </button>
@@ -360,7 +363,7 @@ function Queue({
       </div>
       {!queue.length ? (
         <p className="px-4 py-5 text-[12.5px] leading-relaxed text-ink-3">
-          Empty. Pick orders in the ledger and send them here, or add a payee above.
+          Empty. Pick orders in the ledger and send them here, or add a payee by hand.
         </p>
       ) : (
         <ul className="max-h-[380px] overflow-y-auto">

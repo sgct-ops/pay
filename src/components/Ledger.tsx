@@ -166,17 +166,20 @@ function Summary({
     paid: number;
   };
 }) {
-  const cells = [
+  const cells: Array<{ label: string; value: string; warn?: boolean; span?: boolean }> = [
     { label: "Orders to pay", value: String(totals.openOrders) },
     { label: "Pieces", value: String(totals.openPieces) },
-    { label: "Outstanding", value: money(totals.openValue), wide: true },
+    { label: "Outstanding", value: money(totals.openValue) },
     { label: "No UPI yet", value: String(totals.missingUpi), warn: totals.missingUpi > 0 },
-    { label: "Paid", value: String(totals.paid) },
+    { label: "Paid", value: String(totals.paid), span: true },
   ];
   return (
     <div className="grid grid-cols-2 gap-px overflow-hidden rounded-card border border-line bg-line sm:grid-cols-5">
       {cells.map((c) => (
-        <div key={c.label} className="bg-card px-4 py-3">
+        <div
+          key={c.label}
+          className={`bg-card px-4 py-3 ${c.span ? "col-span-2 sm:col-span-1" : ""}`}
+        >
           <div className="text-[11px] uppercase tracking-[0.07em] text-ink-3">{c.label}</div>
           <div
             className={`tnum display mt-1 text-[19px] font-semibold ${
@@ -258,7 +261,7 @@ function Row({
     <div className={first ? "" : "border-t border-line-soft"}>
       <div
         onClick={onToggleExpand}
-        className={`flex cursor-pointer flex-wrap items-center gap-x-3 gap-y-2 px-3 py-2.5 transition hover:bg-sunk/60 ${
+        className={`flex cursor-pointer flex-wrap items-center gap-x-2 gap-y-2 px-2.5 py-2.5 sm:gap-x-3 sm:px-3 transition hover:bg-sunk/60 ${
           order.paid ? "opacity-60" : ""
         }`}
       >
@@ -266,7 +269,7 @@ function Row({
             checkbox from also unfolding the row. */}
         <div
           onClick={(e) => e.stopPropagation()}
-          className="flex shrink-0 items-center gap-2"
+          className="flex shrink-0 items-center gap-1.5 sm:gap-2"
         >
           <input
             type="checkbox"
@@ -302,11 +305,14 @@ function Row({
           </button>
         </div>
 
-        <div className="tnum w-[92px] shrink-0 font-mono text-[12.5px] text-ink">
+        <div className="tnum hidden w-[92px] shrink-0 font-mono text-[12.5px] text-ink sm:block">
           {order.orderNumber}
         </div>
 
-        <div className="min-w-[120px] flex-1 truncate text-[13px] text-ink">
+        <div className="min-w-[88px] flex-1 truncate text-[13px] text-ink">
+          <span className="tnum mr-1.5 font-mono text-[12px] text-ink-3 sm:hidden">
+            {order.orderNumber}
+          </span>
           {order.customerName || <span className="text-ink-3">No name</span>}
           {order.pieces > 1 && (
             <span className="ml-2 rounded bg-sunk px-1.5 py-0.5 text-[11px] text-ink-2">
@@ -326,7 +332,7 @@ function Row({
 
         <ShipChip order={order} />
 
-        <div className="tnum ml-auto w-[104px] shrink-0 text-right text-[13.5px] font-semibold text-ink">
+        <div className="tnum ml-auto shrink-0 text-right text-[13.5px] font-semibold text-ink sm:w-[96px]">
           {money(order.total)}
           {order.skipped > 0 && (
             <div className="text-[10.5px] font-normal text-ink-3">
