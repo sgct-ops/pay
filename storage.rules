@@ -1,0 +1,30 @@
+rules_version = '2';
+
+// Raw Return Prime exports are archived under uploads/. They contain customer
+// PII, so the same company-domain gate applies, and nothing else in the bucket
+// is reachable at all.
+//
+// Deploy with:  firebase deploy --only storage
+
+service firebase.storage {
+  match /b/{bucket}/o {
+
+    function team() {
+      return request.auth != null
+        && request.auth.token.email_verified == true
+        && request.auth.token.email.lower().matches('^[^@]+@carbontree[.]com$');
+    }
+
+    match /uploads/{allPaths=**} {
+      allow read: if team();
+      // 25 MB is far above any real Return Prime export and keeps the bucket
+      // from becoming general-purpose storage.
+      allow write: if team() && request.resource.size < 25 * 1024 * 1024;
+      allow delete: if false;
+    }
+
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+  }
+}

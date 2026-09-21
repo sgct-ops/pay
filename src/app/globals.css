@@ -1,26 +1,118 @@
 @import "tailwindcss";
 
+/*
+ * CarbonTree Payout Desk — design tokens.
+ * Deliberately light-only: this is a daylight, desk-and-phone tool, and a
+ * half-considered dark mode on a screen someone scans a QR from is worse than
+ * none. color-scheme is pinned so mobile browsers don't auto-invert it.
+ */
+@theme {
+  --color-paper: #faf7f0;
+  --color-card: #ffffff;
+  --color-sunk: #f4f0e7;
+  --color-line: #e7e1d4;
+  --color-line-soft: #f0ece2;
+
+  --color-ink: #1d1f23;
+  --color-ink-2: #4a4f57;
+  --color-ink-3: #82868f;
+
+  --color-spruce: #2f6b4f;
+  --color-spruce-deep: #24533e;
+  --color-spruce-wash: #eaf2ed;
+
+  --color-slate: #5a5f7a;
+  --color-slate-wash: #eeeff4;
+
+  --color-clay: #b4462f;
+  --color-clay-wash: #fbeeea;
+
+  --color-gold: #a67c2e;
+  --color-gold-wash: #f9f2e2;
+
+  --font-display: var(--font-archivo), ui-sans-serif, system-ui, sans-serif;
+  --font-sans: var(--font-public-sans), ui-sans-serif, system-ui, sans-serif;
+  --font-mono: var(--font-plex-mono), ui-monospace, SFMono-Regular, monospace;
+
+  --radius-card: 14px;
+}
+
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  color-scheme: light;
 }
 
-@theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+html,
+body {
+  background: var(--color-paper);
+  color: var(--color-ink);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  /* Home-screen installs sit under the notch; keep content clear of it. */
+  padding-top: env(safe-area-inset-top);
+  padding-bottom: env(safe-area-inset-bottom);
 }
 
 body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  padding-top: 0;
+}
+
+/* Numbers in a ledger must line up; tabular figures everywhere it matters. */
+.tnum {
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum";
+}
+
+.display {
+  font-family: var(--font-display);
+  letter-spacing: -0.015em;
+}
+
+.rule {
+  background-image: linear-gradient(to right, var(--color-line) 50%, transparent 50%);
+  background-size: 6px 1px;
+  background-repeat: repeat-x;
+}
+
+/* The perforation down the middle of the payout voucher. */
+.perf {
+  border-right: 1px dashed var(--color-line);
+}
+
+@media (max-width: 860px) {
+  .perf {
+    border-right: 0;
+    border-bottom: 1px dashed var(--color-line);
+  }
+}
+
+input,
+select,
+textarea,
+button {
+  font-family: inherit;
+}
+
+/* iOS zooms the page when a focused input is under 16px. */
+@media (max-width: 720px) {
+  input,
+  select,
+  textarea {
+    font-size: 16px;
+  }
+}
+
+::selection {
+  background: var(--color-spruce-wash);
+}
+
+*:focus-visible {
+  outline: 2px solid var(--color-spruce);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+@media print {
+  .no-print {
+    display: none !important;
+  }
 }

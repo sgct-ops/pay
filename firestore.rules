@@ -1,0 +1,55 @@
+rules_version = '2';
+
+// CarbonTree Payout Desk.
+//
+// The ledger holds customer names, phone numbers, emails and UPI handles, so
+// the default is deny and every collection opts in explicitly. Access is tied
+// to a verified Google account on the company domain — the `hd` parameter in
+// the sign-in call is only a hint to Google, this file is the actual control.
+//
+// Deploy with:  firebase deploy --only firestore:rules
+//
+// Changing the company domain means changing it here as well as in
+// NEXT_PUBLIC_ALLOWED_EMAIL_DOMAIN.
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function team() {
+      return request.auth != null
+        && request.auth.token.email_verified == true
+        && request.auth.token.email.lower().matches('^[^@]+@carbontree[.]com$');
+    }
+
+    function isOwnEmail(field) {
+      return field == null || field == request.auth.token.email.lower();
+    }
+
+    // One document per order number. Written by uploads and by mark-paid.
+    // Nobody deletes an order: the ledger is the record of what was owed.
+    match /orders/{orderKey} {
+      allow read: if team();
+      allow create, update: if team();
+      allow delete: if false;
+    }
+
+    // One document per upload. Immutable once written.
+    match /batches/{batchId} {
+      allow read: if team();
+      allow create: if team() && isOwnEmail(request.resource.data.uploadedByEmail);
+      allow update, delete: if false;
+    }
+
+    // The payment audit log — append-only on purpose. If it could be edited it
+    // would not be worth keeping.
+    match /payments/{eventId} {
+      allow read: if team();
+      allow create: if team() && isOwnEmail(request.resource.data.byEmail);
+      allow update, delete: if false;
+    }
+
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
