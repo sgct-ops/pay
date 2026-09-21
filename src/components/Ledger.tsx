@@ -1,231 +1,250 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import { useRouter } from "next/navigation";
-import { useOrders, orderToQueueItem, usePayQueue } from "@/lib/store";
+import { useOrders } from "@/lib/store";
+import { useAuth } from "@/lib/auth-context";
 import { groupByWeek } from "@/lib/sheet/transform";
-import type { StoredOrder } from "@/lib/sheet/types";
+import { isUpiHandle } from "@/lib/upi";
+import type { Approval, StoredOrder } from "@/lib/sheet/types";
+import {
+  APPROVAL_LABELS,
+  APPROVAL_TONES,
+  blockingReason,
+  isCorrected,
+  payAmount,
+  payUpi,
+} from "@/lib/order-view";
 import { money, shortDate } from "@/lib/format";
 
-type Filter = "open" | "paid" | "all";
+type Filter = Approval | "all";
 
+/**
+ * The operations desk: verify what the export says, fix what it got wrong, and
+ * decide what accounts is allowed to pay. There is no payment control anywhere
+ * on this screen — that is deliberately someone else's step.
+ */
 export function Ledger() {
-  const { orders, ready, error } = useOrders();
+  const { orders, ready, error, clearError, decide, decideMany } = useOrders();
+  const { can } = useAuth();
+
   const [search, setSearch] = useState("");
-  const [filter, setFilter] = useState<Filter>("open");
-  const [onlyUpi, setOnlyUpi] = useState(false);
+  const [filter, setFilter] = useState<Filter>("pending");
   const [selected, setSelected] = useState<Record<string, true>>({});
   const [open, setOpen] = useState<string | null>(null);
+  const [asking, setAsking] = useState<{ order: StoredOrder | null; approval: Approval } | null>(
+    null,
+  );
+
+  const counts = useMemo(
+    () => ({
+      pending: orders.filter((o) => o.approval === "pending").length,
+      hold: orders.filter((o) => o.approval === "hold").length,
+      approved: orders.filter((o) => o.approval === "approved" && !o.paid).length,
+      failed: orders.filter((o) => o.payFailedReason).length,
+      pendingValue: orders
+        .filter((o) => o.approval === "pending")
+        .reduce((s, o) => s + payAmount(o), 0),
+      noUpi: orders.filter((o) => o.approval !== "rejected" && !payUpi(o) && payAmount(o) > 0)
+        .length,
+    }),
+    [orders],
+  );
 
   const visible = useMemo(() => {
     const q = search.trim().toLowerCase();
     return orders.filter((o) => {
-      if (filter === "open" && o.paid) return false;
-      if (filter === "paid" && !o.paid) return false;
-      if (onlyUpi && !o.upi) return false;
+      if (filter !== "all" && o.approval !== filter) return false;
       if (!q) return true;
       return (
         o.orderNumber.toLowerCase().includes(q) ||
         o.customerName.toLowerCase().includes(q) ||
         o.customerPhone.includes(q) ||
-        o.upi.includes(q)
+        payUpi(o).includes(q)
       );
     });
-  }, [orders, search, filter, onlyUpi]);
+  }, [orders, search, filter]);
 
   const weeks = useMemo(() => groupByWeek(visible), [visible]);
-  const picked = useMemo(
-    () => visible.filter((o) => selected[o.orderKey]),
-    [visible, selected],
-  );
-
-  const totals = useMemo(() => {
-    const open = orders.filter((o) => !o.paid && o.total > 0);
-    return {
-      openOrders: open.length,
-      openPieces: open.reduce((s, o) => s + o.pieces, 0),
-      openValue: open.reduce((s, o) => s + o.total, 0),
-      missingUpi: open.filter((o) => !o.upi).length,
-      paid: orders.filter((o) => o.paid).length,
-    };
-  }, [orders]);
-
-  const toggle = (key: string) =>
-    setSelected((prev) => {
-      const next = { ...prev };
-      if (next[key]) delete next[key];
-      else next[key] = true;
-      return next;
-    });
+  const picked = useMemo(() => visible.filter((o) => selected[o.orderKey]), [visible, selected]);
 
   if (!ready) return <Skeleton />;
 
   return (
-    <div className="space-y-4">
-      <Summary totals={totals} />
+    <div className="space-y-4 pb-24">
+      <div className="grid grid-cols-2 gap-px overflow-hidden rounded-card border border-line bg-line sm:grid-cols-5">
+        <Tile label="To verify" value={String(counts.pending)} />
+        <Tile label="Value pending" value={money(counts.pendingValue)} />
+        <Tile label="On hold" value={String(counts.hold)} warn={counts.hold > 0} />
+        <Tile label="Approved, unpaid" value={String(counts.approved)} />
+        <Tile
+          label={counts.failed ? "Failed transfers" : "No UPI yet"}
+          value={String(counts.failed || counts.noUpi)}
+          warn={Boolean(counts.failed || counts.noUpi)}
+          span
+        />
+      </div>
 
       <div className="flex flex-wrap items-center gap-2">
-        <div className="relative flex-1 min-w-[180px]">
-          <span className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-[13px] text-ink-3">
-            ⌕
-          </span>
-          <input
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            placeholder="Order, name, phone or UPI"
-            className="w-full rounded-lg border border-line bg-card py-2 pl-8 pr-3 text-[13px] text-ink placeholder:text-ink-3 focus:border-spruce focus:outline-none"
-          />
-        </div>
-
-        <Segmented
-          value={filter}
-          onChange={setFilter}
-          options={[
-            { value: "open", label: "To pay" },
-            { value: "paid", label: "Paid" },
-            { value: "all", label: "All" },
-          ]}
+        <input
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          placeholder="Order, name, phone or UPI"
+          className="min-w-[170px] flex-1 rounded-lg border border-line bg-card px-3 py-2 text-[13px] focus:border-spruce focus:outline-none"
         />
-
-        <label className="flex cursor-pointer items-center gap-2 rounded-lg border border-line bg-card px-3 py-2 text-[12.5px] text-ink-2">
-          <input
-            type="checkbox"
-            checked={onlyUpi}
-            onChange={(e) => setOnlyUpi(e.target.checked)}
-            className="h-3.5 w-3.5 accent-[#5a5f7a]"
-          />
-          Has UPI
-        </label>
+        <div className="flex flex-wrap rounded-lg border border-line bg-card p-0.5">
+          {(
+            [
+              ["pending", "To verify"],
+              ["hold", "On hold"],
+              ["approved", "Approved"],
+              ["rejected", "Rejected"],
+              ["all", "All"],
+            ] as Array<[Filter, string]>
+          ).map(([value, label]) => (
+            <button
+              key={value}
+              onClick={() => setFilter(value)}
+              className={`rounded-[6px] px-3 py-1.5 text-[12.5px] font-medium transition ${
+                filter === value ? "bg-spruce text-white" : "text-ink-2 hover:text-ink"
+              }`}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
       </div>
 
       {error && (
-        <p className="rounded-lg border border-gold/30 bg-gold-wash px-3 py-2 text-[12.5px] text-gold">
-          {error}
+        <p className="flex items-start gap-3 rounded-lg border border-clay/30 bg-clay-wash px-3 py-2 text-[12.5px] text-clay">
+          <span className="flex-1">{error}</span>
+          <button onClick={clearError} className="shrink-0 underline">
+            Dismiss
+          </button>
         </p>
       )}
 
       {!visible.length ? (
-        <Empty hasAny={orders.length > 0} />
+        <Empty filter={filter} hasAny={orders.length > 0} />
       ) : (
-        <div className="space-y-5 pb-20">
-          {weeks.map((week) => (
-            <section key={String(week.weekStart)}>
-              <WeekHeader
-                label={week.label}
-                orders={week.orders}
-                allSelected={week.orders.every((o) => selected[o.orderKey] || !o.upi || !o.total)}
-                onSelectAll={(on) =>
-                  setSelected((prev) => {
-                    const next = { ...prev };
-                    for (const o of week.orders) {
-                      if (!o.upi || o.total <= 0 || o.paid) continue;
-                      if (on) next[o.orderKey] = true;
-                      else delete next[o.orderKey];
-                    }
-                    return next;
-                  })
-                }
-              />
-              <div className="overflow-hidden rounded-card border border-line bg-card">
-                {week.orders.map((order, i) => (
-                  <Row
-                    key={order.orderKey}
-                    order={order}
-                    first={i === 0}
-                    selected={Boolean(selected[order.orderKey])}
-                    expanded={open === order.orderKey}
-                    onToggleSelect={() => toggle(order.orderKey)}
-                    onToggleExpand={() =>
-                      setOpen((cur) => (cur === order.orderKey ? null : order.orderKey))
-                    }
-                  />
-                ))}
-              </div>
-            </section>
-          ))}
+        <div className="space-y-5">
+          {weeks.map((week) => {
+            const approvable = week.orders.filter(
+              (o) => !blockingReason(o) && o.approval !== "approved",
+            );
+            return (
+              <section key={String(week.weekStart)}>
+                <div className="mb-2 flex flex-wrap items-center gap-x-3 gap-y-1 px-1">
+                  <label className="flex cursor-pointer items-center gap-2">
+                    <input
+                      type="checkbox"
+                      disabled={!approvable.length || !can.verify}
+                      checked={
+                        approvable.length > 0 && approvable.every((o) => selected[o.orderKey])
+                      }
+                      onChange={(e) =>
+                        setSelected((prev) => {
+                          const next = { ...prev };
+                          for (const o of approvable) {
+                            if (e.target.checked) next[o.orderKey] = true;
+                            else delete next[o.orderKey];
+                          }
+                          return next;
+                        })
+                      }
+                      className="h-4 w-4 rounded-[3px] accent-[#5a5f7a] disabled:opacity-30"
+                    />
+                    <span className="display text-[14px] font-semibold text-ink">{week.label}</span>
+                  </label>
+                  <span className="tnum text-[12px] text-ink-3">
+                    {week.orders.length} order{week.orders.length === 1 ? "" : "s"} ·{" "}
+                    {money(week.orders.reduce((s, o) => s + payAmount(o), 0))}
+                  </span>
+                </div>
+
+                <div className="overflow-hidden rounded-card border border-line bg-card">
+                  {week.orders.map((order, i) => (
+                    <Row
+                      key={order.orderKey}
+                      order={order}
+                      first={i === 0}
+                      canVerify={can.verify}
+                      selected={Boolean(selected[order.orderKey])}
+                      expanded={open === order.orderKey}
+                      onToggleSelect={() =>
+                        setSelected((prev) => {
+                          const next = { ...prev };
+                          if (next[order.orderKey]) delete next[order.orderKey];
+                          else next[order.orderKey] = true;
+                          return next;
+                        })
+                      }
+                      onToggleExpand={() =>
+                        setOpen((cur) => (cur === order.orderKey ? null : order.orderKey))
+                      }
+                      onApprove={() => void decide(order, "approved", null)}
+                      onAsk={(approval) => setAsking({ order, approval })}
+                    />
+                  ))}
+                </div>
+              </section>
+            );
+          })}
         </div>
       )}
 
-      {picked.length > 0 && (
-        <BatchBar picked={picked} onClear={() => setSelected({})} />
-      )}
-    </div>
-  );
-}
-
-/* ------------------------------------------------------------- summary ---- */
-
-function Summary({
-  totals,
-}: {
-  totals: {
-    openOrders: number;
-    openPieces: number;
-    openValue: number;
-    missingUpi: number;
-    paid: number;
-  };
-}) {
-  const cells: Array<{ label: string; value: string; warn?: boolean; span?: boolean }> = [
-    { label: "Orders to pay", value: String(totals.openOrders) },
-    { label: "Pieces", value: String(totals.openPieces) },
-    { label: "Outstanding", value: money(totals.openValue) },
-    { label: "No UPI yet", value: String(totals.missingUpi), warn: totals.missingUpi > 0 },
-    { label: "Paid", value: String(totals.paid), span: true },
-  ];
-  return (
-    <div className="grid grid-cols-2 gap-px overflow-hidden rounded-card border border-line bg-line sm:grid-cols-5">
-      {cells.map((c) => (
-        <div
-          key={c.label}
-          className={`bg-card px-4 py-3 ${c.span ? "col-span-2 sm:col-span-1" : ""}`}
-        >
-          <div className="text-[11px] uppercase tracking-[0.07em] text-ink-3">{c.label}</div>
-          <div
-            className={`tnum display mt-1 text-[19px] font-semibold ${
-              c.warn ? "text-clay" : "text-ink"
-            }`}
-          >
-            {c.value}
+      {picked.length > 0 && can.verify && (
+        <div className="fixed inset-x-0 bottom-[60px] z-30 px-3 lg:bottom-4">
+          <div className="mx-auto flex max-w-[760px] flex-wrap items-center gap-3 rounded-card border border-spruce/25 bg-card px-4 py-3 shadow-[0_8px_24px_rgba(29,31,35,0.10)]">
+            <div className="tnum text-[13px] text-ink">
+              <span className="font-semibold">{picked.length}</span> selected ·{" "}
+              <span className="font-semibold">
+                {money(picked.reduce((s, o) => s + payAmount(o), 0))}
+              </span>
+            </div>
+            <button
+              onClick={() => setSelected({})}
+              className="text-[12.5px] text-ink-3 hover:text-ink"
+            >
+              Clear
+            </button>
+            <button
+              onClick={() => setAsking({ order: null, approval: "hold" })}
+              className="rounded-lg border border-line px-3 py-2 text-[12.5px] font-medium text-ink-2 hover:border-gold hover:text-gold"
+            >
+              Hold
+            </button>
+            <button
+              onClick={() => {
+                void decideMany(
+                  picked.filter((o) => !blockingReason(o)),
+                  "approved",
+                  null,
+                );
+                setSelected({});
+              }}
+              className="rounded-lg bg-spruce px-4 py-2 text-[13px] font-semibold text-white transition hover:bg-spruce-deep"
+            >
+              Approve {picked.filter((o) => !blockingReason(o)).length} →
+            </button>
           </div>
         </div>
-      ))}
-    </div>
-  );
-}
+      )}
 
-/* ---------------------------------------------------------------- week ---- */
-
-function WeekHeader({
-  label,
-  orders,
-  allSelected,
-  onSelectAll,
-}: {
-  label: string;
-  orders: StoredOrder[];
-  allSelected: boolean;
-  onSelectAll: (on: boolean) => void;
-}) {
-  const payable = orders.filter((o) => o.upi && o.total > 0 && !o.paid);
-  const value = payable.reduce((s, o) => s + o.total, 0);
-
-  return (
-    <div className="mb-2 flex flex-wrap items-center gap-x-3 gap-y-1 px-1">
-      <label className="flex cursor-pointer items-center gap-2">
-        <input
-          type="checkbox"
-          checked={payable.length > 0 && allSelected}
-          disabled={!payable.length}
-          onChange={(e) => onSelectAll(e.target.checked)}
-          className="h-4 w-4 rounded-[3px] accent-[#5a5f7a] disabled:opacity-30"
+      {asking && (
+        <ReasonDialog
+          approval={asking.approval}
+          count={asking.order ? 1 : picked.length}
+          onCancel={() => setAsking(null)}
+          onConfirm={async (note) => {
+            if (asking.order) await decide(asking.order, asking.approval, note);
+            else {
+              await decideMany(picked, asking.approval, note);
+              setSelected({});
+            }
+            setAsking(null);
+          }}
         />
-        <span className="display text-[14px] font-semibold text-ink">{label}</span>
-      </label>
-      <span className="tnum text-[12px] text-ink-3">
-        {orders.length} order{orders.length === 1 ? "" : "s"}
-        {payable.length > 0 && <> · {money(value)} to pay</>}
-      </span>
+      )}
     </div>
   );
 }
@@ -235,94 +254,87 @@ function WeekHeader({
 function Row({
   order,
   first,
+  canVerify,
   selected,
   expanded,
   onToggleSelect,
   onToggleExpand,
+  onApprove,
+  onAsk,
 }: {
   order: StoredOrder;
   first: boolean;
+  canVerify: boolean;
   selected: boolean;
   expanded: boolean;
   onToggleSelect: () => void;
   onToggleExpand: () => void;
+  onApprove: () => void;
+  onAsk: (approval: Approval) => void;
 }) {
-  const router = useRouter();
-  const { push } = usePayQueue();
-  const { setPaid } = useOrders();
-  const payable = Boolean(order.upi) && order.total > 0;
-
-  const sendToDesk = () => {
-    push([orderToQueueItem(order)], { replace: true });
-    router.push("/pay");
-  };
+  const blocked = blockingReason(order);
 
   return (
     <div className={first ? "" : "border-t border-line-soft"}>
       <div
         onClick={onToggleExpand}
-        className={`flex cursor-pointer flex-wrap items-center gap-x-2 gap-y-2 px-2.5 py-2.5 sm:gap-x-3 sm:px-3 transition hover:bg-sunk/60 ${
-          order.paid ? "opacity-60" : ""
+        className={`flex cursor-pointer flex-wrap items-center gap-x-2 gap-y-2 px-2.5 py-2.5 transition hover:bg-sunk/60 sm:gap-x-3 sm:px-3 ${
+          order.approval === "rejected" ? "opacity-55" : ""
         }`}
       >
-        {/* Controls. The click-swallowing wrapper is what keeps ticking a
-            checkbox from also unfolding the row. */}
-        <div
-          onClick={(e) => e.stopPropagation()}
-          className="flex shrink-0 items-center gap-1.5 sm:gap-2"
-        >
+        {/* Swallowing clicks here is what stops ticking a box from also
+            unfolding the row. */}
+        <div onClick={(e) => e.stopPropagation()} className="flex shrink-0 items-center gap-1.5">
           <input
             type="checkbox"
-            aria-label={`Select order ${order.orderNumber} for a batch payout`}
+            aria-label={`Select order ${order.orderNumber}`}
             checked={selected}
-            disabled={!payable || order.paid}
+            disabled={!canVerify || Boolean(blocked)}
             onChange={onToggleSelect}
             className="h-4 w-4 rounded-[3px] accent-[#5a5f7a] disabled:opacity-25"
           />
           <span className="h-5 w-px bg-line-soft" aria-hidden />
+          {order.approval === "approved" ? (
+            <button
+              onClick={() => onAsk("hold")}
+              disabled={!canVerify}
+              title="Approved — click to pull it back"
+              className="grid h-6 w-6 place-items-center rounded-full bg-spruce text-[11px] leading-none text-white disabled:opacity-60"
+            >
+              ✓
+            </button>
+          ) : (
+            <button
+              onClick={onApprove}
+              disabled={!canVerify || Boolean(blocked)}
+              title={blocked ?? "Approve for payment"}
+              className="rounded-md border border-spruce/25 bg-spruce-wash px-2.5 py-1 text-[12px] font-semibold text-spruce transition hover:bg-spruce hover:text-white disabled:border-line disabled:bg-sunk disabled:text-ink-3"
+            >
+              Approve
+            </button>
+          )}
           <button
-            onClick={sendToDesk}
-            disabled={!payable}
-            className="rounded-md border border-spruce/25 bg-spruce-wash px-2.5 py-1 text-[12px] font-semibold text-spruce transition hover:bg-spruce hover:text-white disabled:border-line disabled:bg-sunk disabled:text-ink-3"
+            onClick={() => onAsk(order.approval === "rejected" ? "hold" : "rejected")}
+            disabled={!canVerify}
+            title="Reject, or put on hold"
+            className="grid h-6 w-6 place-items-center rounded-full border border-dashed border-ink-3/50 text-[12px] leading-none text-ink-3 transition hover:border-clay hover:text-clay disabled:opacity-30"
           >
-            Pay
+            ×
           </button>
-          <button
-            onClick={() => void setPaid(order, !order.paid)}
-            aria-label={order.paid ? "Mark unpaid" : "Mark paid"}
-            title={
-              order.paid
-                ? `Paid${order.paidByEmail ? ` by ${order.paidByEmail}` : ""} — click to undo`
-                : "Mark paid"
-            }
-            className={`grid h-6 w-6 place-items-center rounded-full text-[11px] leading-none transition ${
-              order.paid
-                ? "bg-spruce text-white"
-                : "border border-dashed border-ink-3/50 text-transparent hover:border-spruce"
-            }`}
-          >
-            ✓
-          </button>
-        </div>
-
-        <div className="tnum hidden w-[92px] shrink-0 font-mono text-[12.5px] text-ink sm:block">
-          {order.orderNumber}
         </div>
 
         <div className="min-w-[88px] flex-1 truncate text-[13px] text-ink">
-          <span className="tnum mr-1.5 font-mono text-[12px] text-ink-3 sm:hidden">
-            {order.orderNumber}
-          </span>
+          <span className="tnum mr-1.5 font-mono text-[12px] text-ink-3">{order.orderNumber}</span>
           {order.customerName || <span className="text-ink-3">No name</span>}
           {order.pieces > 1 && (
-            <span className="ml-2 rounded bg-sunk px-1.5 py-0.5 text-[11px] text-ink-2">
-              {order.pieces} pcs
+            <span className="ml-1.5 rounded bg-sunk px-1.5 py-0.5 text-[11px] text-ink-2">
+              {order.pieces}
             </span>
           )}
         </div>
 
-        <div className="hidden min-w-[150px] flex-1 truncate font-mono text-[12px] text-ink-2 sm:block">
-          {order.upi || <span className="text-clay">UPI missing</span>}
+        <div className="hidden min-w-[140px] flex-1 truncate font-mono text-[12px] text-ink-2 sm:block">
+          {payUpi(order) || <span className="text-clay">UPI missing</span>}
           {order.upiClash && (
             <span className="ml-2 rounded bg-gold-wash px-1.5 py-0.5 text-[11px] text-gold">
               {order.upis.length} handles
@@ -330,14 +342,30 @@ function Row({
           )}
         </div>
 
-        <ShipChip order={order} />
+        <span
+          className={`shrink-0 rounded px-1.5 py-0.5 text-[11px] ${APPROVAL_TONES[order.approval]}`}
+        >
+          {APPROVAL_LABELS[order.approval]}
+        </span>
 
-        <div className="tnum ml-auto shrink-0 text-right text-[13.5px] font-semibold text-ink sm:w-[96px]">
-          {money(order.total)}
-          {order.skipped > 0 && (
-            <div className="text-[10.5px] font-normal text-ink-3">
-              +{order.skipped} not payable
-            </div>
+        {order.payFailedReason && (
+          <span className="shrink-0 rounded bg-clay-wash px-1.5 py-0.5 text-[11px] text-clay">
+            transfer failed
+          </span>
+        )}
+        {order.shipRank >= 4 && (
+          <span
+            className="hidden shrink-0 rounded bg-clay-wash px-1.5 py-0.5 text-[11px] text-clay md:inline"
+            title={order.ships.join(" · ")}
+          >
+            {order.ships[0]}
+          </span>
+        )}
+
+        <div className="tnum ml-auto shrink-0 text-right text-[13.5px] font-semibold text-ink sm:w-[100px]">
+          {money(payAmount(order))}
+          {isCorrected(order) && (
+            <div className="text-[10.5px] font-normal text-gold">corrected</div>
           )}
         </div>
 
@@ -346,47 +374,118 @@ function Row({
         </span>
       </div>
 
-      {expanded && <Detail order={order} />}
+      {expanded && <Detail order={order} canVerify={canVerify} />}
     </div>
-  );
-}
-
-function ShipChip({ order }: { order: StoredOrder }) {
-  if (!order.ships.length) return null;
-  const worst = order.ships[0];
-  const alarming = order.shipRank >= 4;
-  return (
-    <span
-      className={`hidden shrink-0 rounded px-1.5 py-0.5 text-[11px] md:inline ${
-        alarming ? "bg-clay-wash text-clay" : "bg-sunk text-ink-2"
-      }`}
-      title={order.ships.join(" · ")}
-    >
-      {worst}
-    </span>
   );
 }
 
 /* -------------------------------------------------------------- detail ---- */
 
-function Detail({ order }: { order: StoredOrder }) {
+function Detail({ order, canVerify }: { order: StoredOrder; canVerify: boolean }) {
+  const { correct } = useOrders();
+  const [upi, setUpi] = useState(payUpi(order));
+  const [amount, setAmount] = useState(String(payAmount(order)));
+
+  const upiDirty = upi.trim().toLowerCase() !== payUpi(order);
+  const amountDirty = Number(amount) !== payAmount(order);
+  const upiValid = !upi.trim() || isUpiHandle(upi.trim().toLowerCase());
+
   return (
     <div className="border-t border-line-soft bg-sunk/50 px-3 py-3">
+      {(order.approvalNote || order.payFailedReason) && (
+        <div className="mb-3 space-y-1.5">
+          {order.approvalNote && (
+            <p className="rounded-lg border border-gold/30 bg-gold-wash px-2.5 py-2 text-[12px] text-gold">
+              {order.approvalNote}
+              {order.approvalBy && (
+                <span className="text-gold/70">
+                  {" "}
+                  — {order.approvalBy}, {shortDate(order.approvalAt)}
+                </span>
+              )}
+            </p>
+          )}
+          {order.payFailedReason && (
+            <p className="rounded-lg border border-clay/30 bg-clay-wash px-2.5 py-2 text-[12px] text-clay">
+              Transfer failed: {order.payFailedReason}
+            </p>
+          )}
+        </div>
+      )}
+
       <div className="mb-3 grid gap-x-6 gap-y-2 text-[12.5px] sm:grid-cols-3">
         <Field label="Phone" value={order.customerPhone || "—"} mono />
         <Field label="Email" value={order.customerEmail || "—"} />
-        <Field label="Approved" value={shortDate(order.approvedAt)} />
+        <Field label="Approved in Return Prime" value={shortDate(order.approvedAt)} />
         <Field label="Received" value={shortDate(order.receivedAt)} />
         <Field label="Return fees" value={money(order.fees)} />
-        <Field
-          label="Paid"
-          value={
-            order.paid
-              ? `${shortDate(order.paidAt)}${order.paidByEmail ? ` · ${order.paidByEmail}` : ""}`
-              : "Not yet"
-          }
-        />
+        <Field label="Shipment" value={order.ships.join(" · ") || "—"} />
       </div>
+
+      {/* Corrections. The imported values stay untouched underneath — a change
+          here is recorded as a change, not as a replacement. */}
+      {canVerify && (
+        <div className="mb-3 grid gap-3 rounded-lg border border-line bg-card p-3 sm:grid-cols-2">
+          <label className="block">
+            <span className="mb-1 block text-[11px] uppercase tracking-[0.06em] text-ink-3">
+              UPI handle {order.upiOverride && <span className="text-gold">· corrected</span>}
+            </span>
+            <div className="flex gap-2">
+              <input
+                value={upi}
+                onChange={(e) => setUpi(e.target.value)}
+                placeholder="name@bank"
+                className={`min-w-0 flex-1 rounded-lg border bg-paper px-3 py-2 font-mono text-[12.5px] focus:outline-none ${
+                  upiValid ? "border-line focus:border-spruce" : "border-clay"
+                }`}
+              />
+              <button
+                onClick={() => void correct(order, { upi: upi.trim().toLowerCase() || null })}
+                disabled={!upiDirty || !upiValid}
+                className="shrink-0 rounded-lg border border-line px-3 text-[12.5px] font-medium text-ink-2 hover:border-spruce hover:text-spruce disabled:opacity-30"
+              >
+                Save
+              </button>
+            </div>
+            {order.upiOverride && (
+              <span className="mt-1 block text-[11px] text-ink-3">
+                Export had {order.upi || "nothing"}
+              </span>
+            )}
+          </label>
+
+          <label className="block">
+            <span className="mb-1 block text-[11px] uppercase tracking-[0.06em] text-ink-3">
+              Amount{" "}
+              {order.amountOverride !== null && <span className="text-gold">· corrected</span>}
+            </span>
+            <div className="flex gap-2">
+              <input
+                value={amount}
+                onChange={(e) => setAmount(e.target.value)}
+                inputMode="decimal"
+                className="tnum min-w-0 flex-1 rounded-lg border border-line bg-paper px-3 py-2 text-[12.5px] focus:border-spruce focus:outline-none"
+              />
+              <button
+                onClick={() =>
+                  void correct(order, {
+                    amount: Number(amount) === order.total ? null : Number(amount),
+                  })
+                }
+                disabled={!amountDirty || !Number.isFinite(Number(amount))}
+                className="shrink-0 rounded-lg border border-line px-3 text-[12.5px] font-medium text-ink-2 hover:border-spruce hover:text-spruce disabled:opacity-30"
+              >
+                Save
+              </button>
+            </div>
+            {order.amountOverride !== null && (
+              <span className="mt-1 block text-[11px] text-ink-3">
+                Export had {money(order.total)}
+              </span>
+            )}
+          </label>
+        </div>
+      )}
 
       <div className="overflow-hidden rounded-lg border border-line bg-card">
         {order.lines.map((line, i) => (
@@ -425,10 +524,115 @@ function Detail({ order }: { order: StoredOrder }) {
 
       {order.upiClash && (
         <p className="mt-2 rounded-lg border border-gold/30 bg-gold-wash px-2.5 py-2 text-[12px] text-gold">
-          This order carries more than one UPI handle: {order.upis.join(", ")}. The first is used
-          — check the notes before paying.
+          This order carries more than one handle: {order.upis.join(", ")}. Pick the right one
+          above before approving.
         </p>
       )}
+    </div>
+  );
+}
+
+/* --------------------------------------------------------------- bits ----- */
+
+function ReasonDialog({
+  approval,
+  count,
+  onCancel,
+  onConfirm,
+}: {
+  approval: Approval;
+  count: number;
+  onCancel: () => void;
+  onConfirm: (note: string) => Promise<void>;
+}) {
+  const holding = approval === "hold";
+  const presets = holding
+    ? [
+        "Waiting on the customer's UPI ID",
+        "Shipment cancelled — checking with the warehouse",
+        "Amount queried with the customer",
+      ]
+    : [
+        "Not a refund — exchange or alteration",
+        "Already settled another way",
+        "Duplicate of another order",
+      ];
+  const [note, setNote] = useState("");
+
+  return (
+    <div className="fixed inset-0 z-50 grid place-items-center bg-ink/30 px-4">
+      <div className="w-full max-w-[420px] rounded-card border border-line bg-card p-5">
+        <h3 className="display text-[15px] font-semibold text-ink">
+          {holding ? "Put on hold" : "Reject"}
+          {count > 1 && ` — ${count} orders`}
+        </h3>
+        <p className="mt-1 text-[12.5px] leading-relaxed text-ink-2">
+          {holding
+            ? "It stays in the ledger and out of the accounts queue until you approve it. The reason is what stops someone chasing it twice."
+            : "It leaves the queue entirely. Say why, so the decision still makes sense in three months."}
+        </p>
+        <div className="mt-3 space-y-1.5">
+          {presets.map((p) => (
+            <button
+              key={p}
+              onClick={() => setNote(p)}
+              className={`block w-full rounded-lg border px-3 py-2 text-left text-[12.5px] transition ${
+                note === p
+                  ? "border-spruce bg-spruce-wash text-spruce"
+                  : "border-line text-ink-2 hover:border-spruce"
+              }`}
+            >
+              {p}
+            </button>
+          ))}
+          <input
+            value={presets.includes(note) ? "" : note}
+            onChange={(e) => setNote(e.target.value)}
+            placeholder="Or type a reason"
+            className="w-full rounded-lg border border-line bg-paper px-3 py-2 text-[12.5px] focus:border-spruce focus:outline-none"
+          />
+        </div>
+        <div className="mt-4 flex gap-2">
+          <button
+            onClick={onCancel}
+            className="flex-1 rounded-lg border border-line py-2 text-[13px] text-ink-2"
+          >
+            Cancel
+          </button>
+          <button
+            onClick={() => void onConfirm(note.trim())}
+            disabled={!note.trim()}
+            className={`flex-1 rounded-lg py-2 text-[13px] font-semibold text-white disabled:opacity-40 ${
+              holding ? "bg-gold" : "bg-clay"
+            }`}
+          >
+            {holding ? "Hold" : "Reject"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function Tile({
+  label,
+  value,
+  warn,
+  span,
+}: {
+  label: string;
+  value: string;
+  warn?: boolean;
+  span?: boolean;
+}) {
+  return (
+    <div className={`bg-card px-4 py-3 ${span ? "col-span-2 sm:col-span-1" : ""}`}>
+      <div className="text-[11px] uppercase tracking-[0.07em] text-ink-3">{label}</div>
+      <div
+        className={`tnum display mt-1 text-[19px] font-semibold ${warn ? "text-clay" : "text-ink"}`}
+      >
+        {value}
+      </div>
     </div>
   );
 }
@@ -442,77 +646,21 @@ function Field({ label, value, mono }: { label: string; value: string; mono?: bo
   );
 }
 
-/* ----------------------------------------------------------- batch bar ---- */
-
-function BatchBar({ picked, onClear }: { picked: StoredOrder[]; onClear: () => void }) {
-  const router = useRouter();
-  const { push } = usePayQueue();
-  const pieces = picked.reduce((s, o) => s + o.pieces, 0);
-  const value = picked.reduce((s, o) => s + o.total, 0);
-
-  return (
-    <div className="fixed inset-x-0 bottom-[60px] z-30 px-3 lg:bottom-4">
-      <div className="mx-auto flex max-w-[760px] flex-wrap items-center gap-3 rounded-card border border-spruce/25 bg-card px-4 py-3 shadow-[0_8px_24px_rgba(29,31,35,0.10)]">
-        <div className="tnum text-[13px] text-ink">
-          <span className="font-semibold">{picked.length}</span> order
-          {picked.length === 1 ? "" : "s"} · {pieces} pcs ·{" "}
-          <span className="font-semibold">{money(value)}</span>
-        </div>
-        <button onClick={onClear} className="text-[12.5px] text-ink-3 hover:text-ink">
-          Clear
-        </button>
-        <button
-          onClick={() => {
-            push(picked.map(orderToQueueItem), { replace: true });
-            router.push("/pay");
-          }}
-          className="ml-auto rounded-lg bg-spruce px-4 py-2 text-[13px] font-semibold text-white transition hover:bg-spruce-deep"
-        >
-          Pay these {picked.length} →
-        </button>
-      </div>
-    </div>
-  );
-}
-
-/* --------------------------------------------------------------- bits ----- */
-
-function Segmented<T extends string>({
-  value,
-  onChange,
-  options,
-}: {
-  value: T;
-  onChange: (v: T) => void;
-  options: Array<{ value: T; label: string }>;
-}) {
-  return (
-    <div className="flex rounded-lg border border-line bg-card p-0.5">
-      {options.map((o) => (
-        <button
-          key={o.value}
-          onClick={() => onChange(o.value)}
-          className={`rounded-[6px] px-3 py-1.5 text-[12.5px] font-medium transition ${
-            value === o.value ? "bg-spruce text-white" : "text-ink-2 hover:text-ink"
-          }`}
-        >
-          {o.label}
-        </button>
-      ))}
-    </div>
-  );
-}
-
-function Empty({ hasAny }: { hasAny: boolean }) {
+function Empty({ filter, hasAny }: { filter: Filter; hasAny: boolean }) {
+  const copy: Record<Filter, string> = {
+    pending: "Nothing waiting to be verified. Upload an export, or look at the other tabs.",
+    hold: "Nothing on hold.",
+    approved: "Nothing approved yet.",
+    rejected: "Nothing rejected.",
+    all: "Upload a Return Prime export and the orders needing a manual UPI refund will land here.",
+  };
   return (
     <div className="rounded-card border border-dashed border-line bg-card px-6 py-14 text-center">
       <p className="display text-[15px] font-semibold text-ink">
-        {hasAny ? "Nothing matches those filters" : "No orders yet"}
+        {hasAny ? "Nothing here" : "No orders yet"}
       </p>
-      <p className="mx-auto mt-1.5 max-w-[380px] text-[13px] leading-relaxed text-ink-2">
-        {hasAny
-          ? "Widen the search, or switch to All to see paid orders too."
-          : "Upload a Return Prime export and the orders needing a manual UPI refund will land here, grouped by the week they were approved."}
+      <p className="mx-auto mt-1.5 max-w-[400px] text-[13px] leading-relaxed text-ink-2">
+        {copy[filter]}
       </p>
     </div>
   );

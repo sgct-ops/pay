@@ -2,21 +2,36 @@
 
 import { useMemo, useRef, useState } from "react";
 import { useOrders, usePayQueue, type QueueItem } from "@/lib/store";
+import { useAuth } from "@/lib/auth-context";
 import { QrCode } from "@/components/QrCode";
 import { InstallHint } from "@/components/InstallHint";
 import { isUpiHandle, noteFor, noteProblem, upiLink, NOTE_TAG } from "@/lib/upi";
 import { money } from "@/lib/format";
+import type { StoredOrder } from "@/lib/sheet/types";
 
 export function PayDesk() {
   const { queue, index, current, setIndex, step, push, update, remove, clear } = usePayQueue();
-  const { byKey, setPaid } = useOrders();
-  const canvasRef = useRef<HTMLCanvasElement>(null);
-  // Keyed by position, so stepping the carousel clears the "Copied" label
-  // without an effect chasing the index.
+  const { byKey, setPaid, failPayment } = useOrders();
+  const { can, role } = useAuth();
+
+  // Two canvases exist — one per layout — and only one is ever on screen.
+  const deskCanvas = useRef<HTMLCanvasElement>(null);
+  const phoneCanvas = useRef<HTMLCanvasElement>(null);
+
   const [copiedAt, setCopiedAt] = useState(-1);
+  const [showQueue, setShowQueue] = useState(false);
+  const [failing, setFailing] = useState(false);
 
   const order = current ? byKey.get(current.orderKey) ?? null : null;
   const paid = Boolean(order?.paid);
+
+  /**
+   * Amount, handle and note are read-only for anything that came through the
+   * ledger — they are what operations approved, and editing them here would
+   * make the approval meaningless. Only a payee typed straight into the desk
+   * (admin only) can be changed.
+   */
+  const editable = Boolean(current?.adhoc);
 
   const problem = current ? noteProblem(current.note) : null;
   const vpaOk = current ? isUpiHandle(current.vpa) : false;
@@ -27,174 +42,528 @@ export function PayDesk() {
     [queue, byKey],
   );
 
+  const saveQr = () => {
+    const canvas = visibleCanvas(phoneCanvas.current, deskCanvas.current);
+    if (!canvas || !current) return;
+    const a = document.createElement("a");
+    a.href = canvas.toDataURL("image/png");
+    a.download = `upi-${current.orderNumber || current.vpa.replace(/[^a-z0-9]/gi, "-")}.png`;
+    a.click();
+  };
+
+  const copyLink = async () => {
+    if (!link) return;
+    await navigator.clipboard.writeText(link);
+    setCopiedAt(index);
+  };
+
   const markPaidAndAdvance = async () => {
     if (order) await setPaid(order, true);
-    const nextUnpaid = queue.findIndex(
-      (q, i) => i > index && !byKey.get(q.orderKey)?.paid,
-    );
+    const nextUnpaid = queue.findIndex((q, i) => i > index && !byKey.get(q.orderKey)?.paid);
     if (nextUnpaid >= 0) setIndex(nextUnpaid);
     else step(1);
   };
 
+  if (!can.pay) return <NoPayAccess />;
+
   return (
-    <div className="grid gap-4 xl:grid-cols-[320px_minmax(0,1fr)]">
-      <aside className="order-2 space-y-4 xl:order-1">
-        <AddPayee onAdd={(item) => push([item])} />
-        <Queue
-          queue={queue}
-          index={index}
-          onPick={setIndex}
-          onRemove={remove}
-          onClear={clear}
-          isPaid={(key) => Boolean(byKey.get(key)?.paid)}
-        />
-        <InstallHint compact />
-      </aside>
-
-      <section className="order-1 rounded-card border border-line bg-card xl:order-2">
+    <>
+      {/* ----------------------------------------------------------- phone --
+          One screen, nothing to scroll. The order across the screen follows the
+          order of the job: who and how much, then the QR, then the button that
+          actually moves the money, then where you are in the run. */}
+      <div className="flex h-full flex-col gap-2.5 lg:hidden">
         {!current ? (
-          <EmptyDesk />
+          <EmptyDesk role={role} />
         ) : (
-          <div className="grid lg:grid-cols-[286px_minmax(0,1fr)]">
-            {/* Stub: the QR and nothing else, so it stays scannable. On a
-                phone it drops below the payment details — you cannot scan the
-                screen you are holding, so the QR is for someone else's device
-                and the UPI link is what you actually press. */}
-            <div className="perf order-2 flex flex-col items-center justify-center gap-3 px-5 py-6 lg:order-1">
-              <QrCode value={link} disabled={!link} canvasRef={canvasRef} size={224} />
-              <p className="text-center text-[11.5px] leading-relaxed text-ink-3">
-                Scan with any UPI app.
-                <br />
-                Paying from this device? Use{" "}
-                <span className="font-medium text-ink-2">Open in UPI app</span> — a phone can’t
-                scan its own screen.
-              </p>
-            </div>
+          <>
+            <ProgressBar
+              index={index}
+              total={queue.length}
+              unpaidLeft={unpaidLeft}
+              isPaid={(key) => Boolean(byKey.get(key)?.paid)}
+              onOpenQueue={() => setShowQueue(true)}
+              queue={queue}
+              onPick={setIndex}
+            />
 
-            {/* Counterfoil: everything about the payment, beside the QR rather
-                than under it, so a full payout fits one screen. */}
-            <div className="order-1 flex w-full max-w-[620px] flex-col gap-4 px-5 py-6 lg:order-2">
-              <div>
-                <div className="flex flex-wrap items-baseline gap-x-2">
-                  <h2 className="display text-[17px] font-semibold text-ink">
-                    {current.name || "Unnamed payee"}
-                  </h2>
-                  {paid && (
-                    <span className="rounded-full bg-spruce-wash px-2 py-0.5 text-[11px] font-semibold text-spruce">
-                      Paid
-                    </span>
-                  )}
-                </div>
-                <p className="mt-0.5 font-mono text-[13px] text-ink-2">{current.vpa || "—"}</p>
-                {!current.adhoc && (
-                  <p className="mt-0.5 text-[12px] text-ink-3">
-                    Order {current.orderNumber} · {current.pieces} piece
-                    {current.pieces === 1 ? "" : "s"}
-                  </p>
-                )}
-                {!vpaOk && current.vpa && (
-                  <p className="mt-1.5 text-[12px] text-clay">
-                    That does not look like a UPI handle (name@bank).
-                  </p>
-                )}
+            <div className="rounded-card border border-line bg-card px-3.5 py-2.5">
+              <div className="flex items-baseline justify-between gap-3">
+                <span className="display truncate text-[16px] font-semibold text-ink">
+                  {current.name || "Unnamed payee"}
+                </span>
+                <span className="tnum display shrink-0 text-[20px] font-semibold text-ink">
+                  {current.amount ? money(Number(current.amount)) : "—"}
+                </span>
               </div>
-
-              <div className="grid gap-3 sm:grid-cols-[150px_minmax(0,1fr)]">
-                <Labelled label="Amount (₹)">
-                  <input
-                    inputMode="decimal"
-                    value={current.amount}
-                    onChange={(e) => update(current.orderKey, { amount: e.target.value })}
-                    placeholder="Blank = type in app"
-                    className="tnum w-full rounded-lg border border-line bg-paper px-3 py-2 text-[15px] font-semibold text-ink focus:border-spruce focus:outline-none"
-                  />
-                </Labelled>
-                <Labelled label={`Note — must contain ${NOTE_TAG}`}>
+              <div className="mt-0.5 flex items-baseline justify-between gap-3">
+                <span className="truncate font-mono text-[12.5px] text-ink-2">
+                  {current.vpa || "—"}
+                </span>
+                <span className="shrink-0 text-[11.5px] text-ink-3">
+                  {current.adhoc
+                    ? "Added by hand"
+                    : `#${current.orderNumber} · ${current.pieces} pc${
+                        current.pieces === 1 ? "" : "s"
+                      }`}
+                </span>
+              </div>
+              <div className="mt-1.5 flex items-center gap-2 rounded-md bg-sunk px-2 py-1">
+                <span className="shrink-0 text-[10px] uppercase tracking-[0.06em] text-ink-3">
+                  Note
+                </span>
+                {editable ? (
                   <input
                     value={current.note}
                     onChange={(e) => update(current.orderKey, { note: e.target.value })}
-                    className={`w-full rounded-lg border bg-paper px-3 py-2 font-mono text-[13px] text-ink focus:outline-none ${
-                      problem ? "border-clay" : "border-line focus:border-spruce"
-                    }`}
+                    className="min-w-0 flex-1 bg-transparent font-mono text-[12px] text-ink focus:outline-none"
                   />
-                </Labelled>
+                ) : (
+                  <span className="min-w-0 flex-1 truncate font-mono text-[12px] text-ink">
+                    {current.note}
+                  </span>
+                )}
+                {paid && (
+                  <span className="shrink-0 rounded bg-spruce px-1.5 py-0.5 text-[10px] font-semibold text-white">
+                    PAID
+                  </span>
+                )}
               </div>
+            </div>
 
-              {problem ? (
-                <p className="rounded-lg border border-clay/30 bg-clay-wash px-3 py-2 text-[12.5px] text-clay">
-                  {problem} The QR will not build until it is fixed.
-                </p>
-              ) : (
-                <p className="text-[12px] text-ink-3">
-                  The note is what the customer sees on their statement — keep the order number
-                  on it so a query can be traced back.
-                </p>
-              )}
+            {/* The QR takes whatever height is left and no more — that is what
+                keeps a whole payout on one screen. */}
+            <div className="min-h-0 flex-1">
+              <QrCode value={link} fluid disabled={!link} canvasRef={phoneCanvas} />
+            </div>
 
-              <div className="flex flex-wrap gap-2">
-                <a
-                  href={link || undefined}
-                  aria-disabled={!link}
-                  className={`rounded-lg px-4 py-2.5 text-[13px] font-semibold transition ${
-                    link
-                      ? "bg-spruce text-white hover:bg-spruce-deep"
-                      : "pointer-events-none bg-sunk text-ink-3"
-                  }`}
-                >
-                  Open in UPI app
-                </a>
-                <button
-                  onClick={() => saveQr(canvasRef.current, current)}
-                  disabled={!link}
-                  className="rounded-lg border border-line bg-card px-3.5 py-2.5 text-[13px] font-medium text-ink-2 transition hover:border-spruce hover:text-spruce disabled:opacity-40"
-                >
-                  Save QR
-                </button>
-                <button
-                  onClick={async () => {
-                    if (!link) return;
-                    await navigator.clipboard.writeText(link);
-                    setCopiedAt(index);
-                  }}
-                  disabled={!link}
-                  className="rounded-lg border border-line bg-card px-3.5 py-2.5 text-[13px] font-medium text-ink-2 transition hover:border-spruce hover:text-spruce disabled:opacity-40"
-                >
-                  {copiedAt === index ? "Copied" : "Copy link"}
-                </button>
-                <button
-                  onClick={() => order && void setPaid(order, !paid)}
-                  disabled={!order}
-                  className={`rounded-lg px-4 py-2.5 text-[13px] font-semibold transition disabled:opacity-40 sm:ml-auto ${
-                    paid
-                      ? "border border-line bg-card text-ink-2 hover:border-clay hover:text-clay"
-                      : "border border-spruce/30 bg-spruce-wash text-spruce hover:bg-spruce hover:text-white"
-                  }`}
-                >
-                  {paid ? "Undo paid" : "Mark paid"}
-                </button>
-              </div>
+            {!link && (
+              <p className="rounded-lg border border-clay/30 bg-clay-wash px-3 py-2 text-[12px] text-clay">
+                {problem ?? "This payee has no usable UPI handle."}
+              </p>
+            )}
 
-              {queue.length > 1 && (
-                <Carousel
-                  queue={queue}
-                  index={index}
-                  unpaidLeft={unpaidLeft}
-                  isPaid={(key) => Boolean(byKey.get(key)?.paid)}
-                  onStep={step}
-                  onPick={setIndex}
-                  onPaidNext={markPaidAndAdvance}
-                  canMark={Boolean(order) && !paid}
-                />
+            <a
+              href={link || undefined}
+              aria-disabled={!link}
+              className={`rounded-lg py-3 text-center text-[15px] font-semibold transition ${
+                link
+                  ? "bg-spruce text-white active:bg-spruce-deep"
+                  : "pointer-events-none bg-sunk text-ink-3"
+              }`}
+            >
+              Open in UPI app
+            </a>
+
+            <div className="flex gap-2">
+              <button
+                onClick={() => step(-1)}
+                disabled={index === 0}
+                aria-label="Previous payout"
+                className="grid w-12 shrink-0 place-items-center rounded-lg border border-line bg-card text-ink-2 disabled:opacity-30"
+              >
+                ←
+              </button>
+              <button
+                onClick={() => {
+                  if (!order) return;
+                  void (paid ? setPaid(order, false) : markPaidAndAdvance());
+                }}
+                disabled={!order}
+                className={`flex-1 rounded-lg py-3 text-[14px] font-semibold transition disabled:opacity-40 ${
+                  paid
+                    ? "border border-line bg-card text-ink-2"
+                    : "border border-spruce/30 bg-spruce-wash text-spruce"
+                }`}
+              >
+                {paid ? "Undo paid" : queue.length > 1 ? "Mark paid & next →" : "Mark paid"}
+              </button>
+              <button
+                onClick={() => step(1)}
+                disabled={index >= queue.length - 1}
+                aria-label="Next payout"
+                className="grid w-12 shrink-0 place-items-center rounded-lg border border-line bg-card text-ink-2 disabled:opacity-30"
+              >
+                →
+              </button>
+            </div>
+
+            <div className="flex items-center justify-between gap-2 pb-1 text-[12px]">
+              <button onClick={saveQr} disabled={!link} className="text-ink-3 disabled:opacity-40">
+                Save QR
+              </button>
+              <button
+                onClick={() => void copyLink()}
+                disabled={!link}
+                className="text-ink-3 disabled:opacity-40"
+              >
+                {copiedAt === index ? "Copied" : "Copy link"}
+              </button>
+              {order && !current.adhoc && (
+                <button onClick={() => setFailing(true)} className="text-clay">
+                  Payment failed
+                </button>
               )}
             </div>
-          </div>
+          </>
         )}
-      </section>
+      </div>
+
+      {/* --------------------------------------------------------- desktop -- */}
+      <div className="hidden gap-4 lg:grid xl:grid-cols-[320px_minmax(0,1fr)]">
+        <aside className="space-y-4">
+          {can.manageRoles && <AddPayee onAdd={(item) => push([item])} />}
+          <Queue
+            queue={queue}
+            index={index}
+            onPick={setIndex}
+            onRemove={remove}
+            onClear={clear}
+            isPaid={(key) => Boolean(byKey.get(key)?.paid)}
+          />
+          <InstallHint compact />
+        </aside>
+
+        <section className="rounded-card border border-line bg-card">
+          {!current ? (
+            <EmptyDesk role={role} />
+          ) : (
+            <div className="grid lg:grid-cols-[286px_minmax(0,1fr)]">
+              <div className="perf flex flex-col items-center justify-center gap-3 px-5 py-6">
+                <QrCode value={link} disabled={!link} canvasRef={deskCanvas} size={224} />
+                <p className="text-center text-[11.5px] leading-relaxed text-ink-3">
+                  Scan with any UPI app.
+                  <br />
+                  Paying from this device? Use{" "}
+                  <span className="font-medium text-ink-2">Open in UPI app</span> — a screen can’t
+                  scan itself.
+                </p>
+              </div>
+
+              <div className="flex w-full max-w-[620px] flex-col gap-4 px-5 py-6">
+                <div>
+                  <div className="flex flex-wrap items-baseline gap-x-2">
+                    <h2 className="display text-[17px] font-semibold text-ink">
+                      {current.name || "Unnamed payee"}
+                    </h2>
+                    {paid && (
+                      <span className="rounded-full bg-spruce-wash px-2 py-0.5 text-[11px] font-semibold text-spruce">
+                        Paid
+                      </span>
+                    )}
+                  </div>
+                  <p className="mt-0.5 font-mono text-[13px] text-ink-2">{current.vpa || "—"}</p>
+                  {!current.adhoc && (
+                    <p className="mt-0.5 text-[12px] text-ink-3">
+                      Order {current.orderNumber} · {current.pieces} piece
+                      {current.pieces === 1 ? "" : "s"}
+                      {order?.approvalBy && <> · approved by {order.approvalBy}</>}
+                    </p>
+                  )}
+                </div>
+
+                <div className="grid gap-3 sm:grid-cols-[170px_minmax(0,1fr)]">
+                  <Labelled label="Amount (₹)">
+                    {editable ? (
+                      <input
+                        inputMode="decimal"
+                        value={current.amount}
+                        onChange={(e) => update(current.orderKey, { amount: e.target.value })}
+                        className="tnum w-full rounded-lg border border-line bg-paper px-3 py-2 text-[15px] font-semibold text-ink focus:border-spruce focus:outline-none"
+                      />
+                    ) : (
+                      <div className="tnum rounded-lg border border-line bg-sunk px-3 py-2 text-[15px] font-semibold text-ink">
+                        {current.amount ? money(Number(current.amount)) : "—"}
+                      </div>
+                    )}
+                  </Labelled>
+                  <Labelled label={`Note — must contain ${NOTE_TAG}`}>
+                    {editable ? (
+                      <input
+                        value={current.note}
+                        onChange={(e) => update(current.orderKey, { note: e.target.value })}
+                        className={`w-full rounded-lg border bg-paper px-3 py-2 font-mono text-[13px] text-ink focus:outline-none ${
+                          problem ? "border-clay" : "border-line focus:border-spruce"
+                        }`}
+                      />
+                    ) : (
+                      <div className="rounded-lg border border-line bg-sunk px-3 py-2 font-mono text-[13px] text-ink">
+                        {current.note}
+                      </div>
+                    )}
+                  </Labelled>
+                </div>
+
+                {problem ? (
+                  <p className="rounded-lg border border-clay/30 bg-clay-wash px-3 py-2 text-[12.5px] text-clay">
+                    {problem} The QR will not build until it is fixed.
+                  </p>
+                ) : (
+                  <p className="text-[12px] text-ink-3">
+                    {editable
+                      ? "The note is what the customer sees on their statement."
+                      : "The amount and handle are what operations approved. If either looks wrong, send it back rather than editing it here."}
+                  </p>
+                )}
+
+                <div className="flex flex-wrap gap-2">
+                  <a
+                    href={link || undefined}
+                    aria-disabled={!link}
+                    className={`rounded-lg px-4 py-2.5 text-[13px] font-semibold transition ${
+                      link
+                        ? "bg-spruce text-white hover:bg-spruce-deep"
+                        : "pointer-events-none bg-sunk text-ink-3"
+                    }`}
+                  >
+                    Open in UPI app
+                  </a>
+                  <button
+                    onClick={saveQr}
+                    disabled={!link}
+                    className="rounded-lg border border-line bg-card px-3.5 py-2.5 text-[13px] font-medium text-ink-2 transition hover:border-spruce hover:text-spruce disabled:opacity-40"
+                  >
+                    Save QR
+                  </button>
+                  <button
+                    onClick={() => void copyLink()}
+                    disabled={!link}
+                    className="rounded-lg border border-line bg-card px-3.5 py-2.5 text-[13px] font-medium text-ink-2 transition hover:border-spruce hover:text-spruce disabled:opacity-40"
+                  >
+                    {copiedAt === index ? "Copied" : "Copy link"}
+                  </button>
+                  {order && !current.adhoc && (
+                    <button
+                      onClick={() => setFailing(true)}
+                      className="rounded-lg border border-line bg-card px-3.5 py-2.5 text-[13px] font-medium text-ink-2 transition hover:border-clay hover:text-clay"
+                    >
+                      Payment failed
+                    </button>
+                  )}
+                  <button
+                    onClick={() => order && void setPaid(order, !paid)}
+                    disabled={!order}
+                    className={`rounded-lg px-4 py-2.5 text-[13px] font-semibold transition disabled:opacity-40 sm:ml-auto ${
+                      paid
+                        ? "border border-line bg-card text-ink-2 hover:border-clay hover:text-clay"
+                        : "border border-spruce/30 bg-spruce-wash text-spruce hover:bg-spruce hover:text-white"
+                    }`}
+                  >
+                    {paid ? "Undo paid" : "Mark paid"}
+                  </button>
+                </div>
+
+                {queue.length > 1 && (
+                  <Carousel
+                    queue={queue}
+                    index={index}
+                    unpaidLeft={unpaidLeft}
+                    isPaid={(key) => Boolean(byKey.get(key)?.paid)}
+                    onStep={step}
+                    onPick={setIndex}
+                    onPaidNext={markPaidAndAdvance}
+                    canMark={Boolean(order) && !paid}
+                  />
+                )}
+              </div>
+            </div>
+          )}
+        </section>
+      </div>
+
+      {showQueue && (
+        <QueueSheet
+          queue={queue}
+          index={index}
+          isPaid={(key) => Boolean(byKey.get(key)?.paid)}
+          onPick={(i) => {
+            setIndex(i);
+            setShowQueue(false);
+          }}
+          onClose={() => setShowQueue(false)}
+        />
+      )}
+
+      {failing && order && (
+        <FailDialog
+          order={order}
+          onCancel={() => setFailing(false)}
+          onConfirm={async (reason) => {
+            await failPayment(order, reason);
+            setFailing(false);
+          }}
+        />
+      )}
+    </>
+  );
+}
+
+/* ------------------------------------------------------------- phone bits -- */
+
+function ProgressBar({
+  index,
+  total,
+  unpaidLeft,
+  queue,
+  isPaid,
+  onPick,
+  onOpenQueue,
+}: {
+  index: number;
+  total: number;
+  unpaidLeft: number;
+  queue: QueueItem[];
+  isPaid: (key: string) => boolean;
+  onPick: (i: number) => void;
+  onOpenQueue: () => void;
+}) {
+  return (
+    <div className="flex items-center gap-3">
+      <span className="tnum shrink-0 text-[12.5px] text-ink-2">
+        <span className="font-semibold text-ink">{index + 1}</span> of {total}
+        {unpaidLeft > 0 && <span className="text-ink-3"> · {unpaidLeft} left</span>}
+      </span>
+      <div className="flex min-w-0 flex-1 gap-1 overflow-hidden">
+        {queue.slice(0, 14).map((q, i) => (
+          <button
+            key={q.orderKey}
+            onClick={() => onPick(i)}
+            aria-label={`Payout ${i + 1}`}
+            className={`h-1.5 min-w-0 flex-1 rounded-full ${
+              i === index ? "bg-ink" : isPaid(q.orderKey) ? "bg-spruce/60" : "bg-line"
+            }`}
+          />
+        ))}
+      </div>
+      <button
+        onClick={onOpenQueue}
+        className="shrink-0 rounded-full border border-line bg-card px-2.5 py-1 text-[11.5px] text-ink-2"
+      >
+        Queue
+      </button>
     </div>
   );
 }
 
-/* ------------------------------------------------------------ carousel ---- */
+function QueueSheet({
+  queue,
+  index,
+  isPaid,
+  onPick,
+  onClose,
+}: {
+  queue: QueueItem[];
+  index: number;
+  isPaid: (key: string) => boolean;
+  onPick: (i: number) => void;
+  onClose: () => void;
+}) {
+  return (
+    <div className="fixed inset-0 z-40 flex flex-col justify-end bg-ink/30 lg:hidden">
+      <button className="flex-1" onClick={onClose} aria-label="Close the queue" />
+      <div className="max-h-[70dvh] overflow-y-auto rounded-t-2xl border-t border-line bg-card pb-[env(safe-area-inset-bottom)]">
+        <div className="sticky top-0 flex items-center justify-between border-b border-line-soft bg-card px-4 py-3">
+          <span className="display text-[14px] font-semibold text-ink">
+            Queue <span className="tnum font-normal text-ink-3">{queue.length}</span>
+          </span>
+          <button onClick={onClose} className="text-[13px] text-ink-3">
+            Done
+          </button>
+        </div>
+        <ul>
+          {queue.map((q, i) => (
+            <li key={q.orderKey}>
+              <button
+                onClick={() => onPick(i)}
+                className={`flex w-full items-center gap-3 border-b border-line-soft px-4 py-3 text-left ${
+                  i === index ? "bg-spruce-wash" : ""
+                }`}
+              >
+                <span className="min-w-0 flex-1">
+                  <span className="block truncate text-[13px] text-ink">{q.name || q.vpa}</span>
+                  <span className="tnum block truncate font-mono text-[11px] text-ink-3">
+                    {q.orderNumber ? `#${q.orderNumber} · ` : ""}
+                    {q.amount ? money(Number(q.amount)) : "no amount"}
+                  </span>
+                </span>
+                {isPaid(q.orderKey) && <span className="text-[13px] text-spruce">✓</span>}
+              </button>
+            </li>
+          ))}
+        </ul>
+      </div>
+    </div>
+  );
+}
+
+function FailDialog({
+  order,
+  onCancel,
+  onConfirm,
+}: {
+  order: StoredOrder;
+  onCancel: () => void;
+  onConfirm: (reason: string) => Promise<void>;
+}) {
+  const [reason, setReason] = useState("");
+  const presets = [
+    "UPI handle rejected the transfer",
+    "Customer asked for a different handle",
+    "Bank declined or limit reached",
+  ];
+
+  return (
+    <div className="fixed inset-0 z-50 grid place-items-center bg-ink/30 px-4">
+      <div className="w-full max-w-[420px] rounded-card border border-line bg-card p-5">
+        <h3 className="display text-[15px] font-semibold text-ink">
+          Send #{order.orderNumber} back to operations
+        </h3>
+        <p className="mt-1 text-[12.5px] leading-relaxed text-ink-2">
+          It stays approved but is flagged as a failed transfer, so operations can fix the handle
+          and approve it again. Nothing is marked paid.
+        </p>
+        <div className="mt-3 space-y-1.5">
+          {presets.map((p) => (
+            <button
+              key={p}
+              onClick={() => setReason(p)}
+              className={`block w-full rounded-lg border px-3 py-2 text-left text-[12.5px] transition ${
+                reason === p
+                  ? "border-spruce bg-spruce-wash text-spruce"
+                  : "border-line text-ink-2 hover:border-spruce"
+              }`}
+            >
+              {p}
+            </button>
+          ))}
+          <input
+            value={presets.includes(reason) ? "" : reason}
+            onChange={(e) => setReason(e.target.value)}
+            placeholder="Or type what happened"
+            className="w-full rounded-lg border border-line bg-paper px-3 py-2 text-[12.5px] focus:border-spruce focus:outline-none"
+          />
+        </div>
+        <div className="mt-4 flex gap-2">
+          <button
+            onClick={onCancel}
+            className="flex-1 rounded-lg border border-line py-2 text-[13px] text-ink-2"
+          >
+            Cancel
+          </button>
+          <button
+            onClick={() => void onConfirm(reason.trim())}
+            disabled={!reason.trim()}
+            className="flex-1 rounded-lg bg-clay py-2 text-[13px] font-semibold text-white disabled:opacity-40"
+          >
+            Send back
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ----------------------------------------------------------- desktop bits -- */
 
 function Carousel({
   queue,
@@ -243,7 +612,7 @@ function Carousel({
           disabled={!canMark}
           className="ml-auto whitespace-nowrap rounded-lg bg-spruce px-3.5 py-2 text-[12.5px] font-semibold text-white transition hover:bg-spruce-deep disabled:opacity-40"
         >
-          Mark paid & next →
+          Mark paid &amp; next →
         </button>
       </div>
 
@@ -267,8 +636,6 @@ function Carousel({
     </div>
   );
 }
-
-/* ---------------------------------------------------------------- side ---- */
 
 function AddPayee({ onAdd }: { onAdd: (item: QueueItem) => void }) {
   const [vpa, setVpa] = useState("");
@@ -296,8 +663,8 @@ function AddPayee({ onAdd }: { onAdd: (item: QueueItem) => void }) {
   return (
     <div className="rounded-card border border-line bg-card p-4">
       <h3 className="display text-[13px] font-semibold text-ink">Add a payee</h3>
-      <p className="mt-0.5 text-[12px] text-ink-3">
-        For a payout that isn’t in the ledger.
+      <p className="mt-0.5 text-[12px] leading-relaxed text-ink-3">
+        A payout with no approval behind it. Admin only, and it reads as such in the audit trail.
       </p>
       <div className="mt-3 space-y-2">
         <input
@@ -363,7 +730,7 @@ function Queue({
       </div>
       {!queue.length ? (
         <p className="px-4 py-5 text-[12.5px] leading-relaxed text-ink-3">
-          Empty. Pick orders in the ledger and send them here, or add a payee by hand.
+          Empty. Pick approved refunds and send them here.
         </p>
       ) : (
         <ul className="max-h-[380px] overflow-y-auto">
@@ -402,14 +769,33 @@ function Queue({
   );
 }
 
-function EmptyDesk() {
+/* ---------------------------------------------------------------- shared -- */
+
+function EmptyDesk({ role }: { role: string }) {
   return (
-    <div className="px-6 py-20 text-center">
-      <p className="display text-[15px] font-semibold text-ink">Nothing queued</p>
-      <p className="mx-auto mt-1.5 max-w-[380px] text-[13px] leading-relaxed text-ink-2">
-        Select orders in the ledger and send them here — they arrive as a carousel you can work
-        through one at a time, marking each paid as you go.
-      </p>
+    <div className="grid h-full place-items-center rounded-card border border-line bg-card px-6 py-16 text-center">
+      <div>
+        <p className="display text-[15px] font-semibold text-ink">Nothing queued</p>
+        <p className="mx-auto mt-1.5 max-w-[380px] text-[13px] leading-relaxed text-ink-2">
+          {role === "accounts"
+            ? "Open Refunds, pick the approved orders you want to pay, and send them here. They arrive as a carousel you work through one at a time."
+            : "Select approved orders and send them here — they arrive as a carousel you work through one at a time, marking each paid as you go."}
+        </p>
+      </div>
+    </div>
+  );
+}
+
+function NoPayAccess() {
+  return (
+    <div className="grid h-full place-items-center px-6 py-16 text-center">
+      <div>
+        <p className="display text-[15px] font-semibold text-ink">Payments are not your step</p>
+        <p className="mx-auto mt-1.5 max-w-[420px] text-[13px] leading-relaxed text-ink-2">
+          Operations verifies and approves; accounts pays. That split is enforced by the database,
+          not just this screen — approving and paying are deliberately different pairs of hands.
+        </p>
+      </div>
     </div>
   );
 }
@@ -425,10 +811,7 @@ function Labelled({ label, children }: { label: string; children: React.ReactNod
   );
 }
 
-function saveQr(canvas: HTMLCanvasElement | null, item: QueueItem) {
-  if (!canvas) return;
-  const a = document.createElement("a");
-  a.href = canvas.toDataURL("image/png");
-  a.download = `upi-${item.orderNumber || item.vpa.replace(/[^a-z0-9]/gi, "-")}.png`;
-  a.click();
+/** Whichever canvas is actually on screen — the two layouts are exclusive. */
+function visibleCanvas(...candidates: Array<HTMLCanvasElement | null>): HTMLCanvasElement | null {
+  return candidates.find((c) => c && c.offsetParent !== null) ?? null;
 }

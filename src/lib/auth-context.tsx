@@ -17,6 +17,8 @@ import {
   initAnalytics,
   isAllowedEmail,
 } from "@/lib/firebase";
+import { resolveRole } from "@/lib/data/orders";
+import { capabilities, type Capabilities, type Role } from "@/lib/roles";
 
 export interface TeamUser {
   uid: string;
@@ -27,10 +29,18 @@ export interface TeamUser {
 
 interface AuthValue {
   user: TeamUser | null;
+  /** The role this session is acting with — `viewingAs` when an admin has switched. */
+  role: Role;
+  /** What the account actually is, regardless of any admin role switch. */
+  realRole: Role;
+  can: Capabilities;
   loading: boolean;
   error: string | null;
   signIn: () => Promise<void>;
   signOutNow: () => Promise<void>;
+  /** Admin only: look at the app through another role's eyes. */
+  viewAs: (role: Role | null) => void;
+  viewingAs: Role | null;
 }
 
 const AuthContext = createContext<AuthValue | null>(null);
@@ -46,6 +56,8 @@ function toTeamUser(user: User): TeamUser {
 
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<TeamUser | null>(null);
+  const [realRole, setRealRole] = useState<Role>("none");
+  const [viewingAs, setViewingAs] = useState<Role | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -54,6 +66,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     const unsub = onAuthStateChanged(auth, (u) => {
       if (!u) {
         setUser(null);
+        setRealRole("none");
+        setViewingAs(null);
         setLoading(false);
         return;
       }
@@ -67,10 +81,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         setLoading(false);
         return;
       }
-      setError(null);
-      setUser(toTeamUser(u));
-      setLoading(false);
-      void initAnalytics();
+      const team = toTeamUser(u);
+      void resolveRole(team.email).then((resolved) => {
+        setRealRole(resolved);
+        setError(null);
+        setUser(team);
+        setLoading(false);
+        void initAnalytics();
+      });
     });
     return unsub;
   }, []);
@@ -99,9 +117,30 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     await signOut(getFirebaseAuth());
   }, []);
 
+  // Only an admin may switch, and it changes what the screen offers — never
+  // what the database allows. An admin working as accounts is still an admin to
+  // the security rules, and everything is logged under their own address.
+  const viewAs = useCallback(
+    (next: Role | null) => setViewingAs(realRole === "admin" ? next : null),
+    [realRole],
+  );
+
+  const role: Role = realRole === "admin" && viewingAs ? viewingAs : realRole;
+
   const value = useMemo(
-    () => ({ user, loading, error, signIn, signOutNow }),
-    [user, loading, error, signIn, signOutNow],
+    () => ({
+      user,
+      role,
+      realRole,
+      can: capabilities(role),
+      loading,
+      error,
+      signIn,
+      signOutNow,
+      viewAs,
+      viewingAs,
+    }),
+    [user, role, realRole, loading, error, signIn, signOutNow, viewAs, viewingAs],
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

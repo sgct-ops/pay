@@ -15,11 +15,21 @@ service firebase.storage {
         && request.auth.token.email.lower().matches('^[^@]+@carbontree[.]com$');
     }
 
+    // Uploading an export is the operations step. Storage rules cannot read
+    // Firestore, so the operations addresses are listed here; everyone on the
+    // team can still read the archive.
+    function uploader() {
+      return team() && (
+        request.auth.token.email.lower() == 'operations@carbontree.com' ||
+        request.auth.token.email.lower() == 'shantanu@carbontree.com'
+      );
+    }
+
     match /uploads/{allPaths=**} {
       allow read: if team();
       // 25 MB is far above any real Return Prime export and keeps the bucket
       // from becoming general-purpose storage.
-      allow write: if team() && request.resource.size < 25 * 1024 * 1024;
+      allow write: if uploader() && request.resource.size < 25 * 1024 * 1024;
       allow delete: if false;
     }
 

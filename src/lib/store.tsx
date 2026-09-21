@@ -11,14 +11,21 @@ import {
   type ReactNode,
 } from "react";
 import {
+  applyCorrection,
   clearSyncState,
   markOrderPaid,
+  markPayFailed,
   pullOrdersFromServer,
   readOrdersFromCache,
   readSyncState,
+  setApproval,
+  setApprovalMany,
   writeSyncState,
+  type Actor,
+  type CorrectionInput,
 } from "@/lib/data/orders";
-import type { StoredOrder } from "@/lib/sheet/types";
+import type { Approval, StoredOrder } from "@/lib/sheet/types";
+import { payAmount, payUpi } from "@/lib/order-view";
 import { noteFor } from "@/lib/upi";
 import { useAuth } from "@/lib/auth-context";
 
@@ -30,11 +37,18 @@ interface OrdersValue {
   refreshing: boolean;
   lastSyncedAt: number;
   error: string | null;
+  clearError: () => void;
   /** Pull changes since the last sync. `full` re-reads everything. */
   refresh: (full?: boolean) => Promise<void>;
   /** Fold freshly uploaded orders in without waiting for a round trip. */
   merge: (orders: StoredOrder[]) => void;
+  /* operations */
+  decide: (order: StoredOrder, approval: Approval, note: string | null) => Promise<void>;
+  decideMany: (orders: StoredOrder[], approval: Approval, note: string | null) => Promise<void>;
+  correct: (order: StoredOrder, change: CorrectionInput) => Promise<void>;
+  /* accounts */
   setPaid: (order: StoredOrder, paid: boolean) => Promise<void>;
+  failPayment: (order: StoredOrder, reason: string) => Promise<void>;
   byKey: Map<string, StoredOrder>;
 }
 
@@ -48,7 +62,7 @@ function mergeOrders(current: StoredOrder[], incoming: StoredOrder[]): StoredOrd
 }
 
 export function OrdersProvider({ children }: { children: ReactNode }) {
-  const { user } = useAuth();
+  const { user, role } = useAuth();
   const [orders, setOrders] = useState<StoredOrder[]>([]);
   const [ready, setReady] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
@@ -57,29 +71,33 @@ export function OrdersProvider({ children }: { children: ReactNode }) {
   const cursor = useRef(0);
   const bootstrapped = useRef(false);
 
-  const refresh = useCallback(
-    async (full = false) => {
-      setRefreshing(true);
-      setError(null);
-      try {
-        if (full) {
-          cursor.current = 0;
-          clearSyncState();
-        }
-        const result = await pullOrdersFromServer(cursor.current, full);
-        cursor.current = result.cursor;
-        const syncedAt = Date.now();
-        setOrders((prev) => (full ? result.orders : mergeOrders(prev, result.orders)));
-        setLastSyncedAt(syncedAt);
-        writeSyncState({ cursor: result.cursor, lastSyncedAt: syncedAt });
-      } catch (e) {
-        setError(friendlyError(e));
-      } finally {
-        setRefreshing(false);
-      }
-    },
-    [],
+  // Memoised so the write callbacks below keep a stable identity — otherwise
+  // every render hands the whole tree new functions.
+  const actor: Actor | null = useMemo(
+    () => (user ? { uid: user.uid, email: user.email, role } : null),
+    [user, role],
   );
+
+  const refresh = useCallback(async (full = false) => {
+    setRefreshing(true);
+    setError(null);
+    try {
+      if (full) {
+        cursor.current = 0;
+        clearSyncState();
+      }
+      const result = await pullOrdersFromServer(cursor.current, full);
+      cursor.current = result.cursor;
+      const syncedAt = Date.now();
+      setOrders((prev) => (full ? result.orders : mergeOrders(prev, result.orders)));
+      setLastSyncedAt(syncedAt);
+      writeSyncState({ cursor: result.cursor, lastSyncedAt: syncedAt });
+    } catch (e) {
+      setError(friendlyError(e));
+    } finally {
+      setRefreshing(false);
+    }
+  }, []);
 
   // Open from the local cache — free, instant, and works with no signal.
   // The server is only contacted on a first run, when there is nothing cached
@@ -115,36 +133,155 @@ export function OrdersProvider({ children }: { children: ReactNode }) {
     setOrders((prev) => mergeOrders(prev, incoming));
   }, []);
 
-  const setPaid = useCallback(
-    async (order: StoredOrder, paid: boolean) => {
-      if (!user) return;
-      const at = paid ? Date.now() : null;
-      // Optimistic: the tick lands before the write does, so the ledger keeps
-      // up with someone working through a carousel at speed.
+  /**
+   * Apply a change locally first, then persist. If the write is refused — most
+   * likely a role that is not allowed to make it — the optimistic change rolls
+   * back and the reason surfaces, rather than the screen quietly disagreeing
+   * with the database.
+   */
+  const optimistic = useCallback(
+    async (order: StoredOrder, patch: Partial<StoredOrder>, write: () => Promise<void>) => {
+      setOrders((prev) =>
+        prev.map((o) => (o.orderKey === order.orderKey ? { ...o, ...patch } : o)),
+      );
+      try {
+        await write();
+      } catch (e) {
+        setOrders((prev) => prev.map((o) => (o.orderKey === order.orderKey ? order : o)));
+        setError(friendlyError(e));
+      }
+    },
+    [],
+  );
+
+  const decide = useCallback(
+    async (order: StoredOrder, approval: Approval, note: string | null) => {
+      if (!actor) return;
+      await optimistic(
+        order,
+        {
+          approval,
+          approvalNote: note,
+          approvalBy: actor.email,
+          approvalAt: Date.now(),
+          ...(approval === "approved" ? { payFailedReason: null } : {}),
+        },
+        () => setApproval(order, approval, note, actor),
+      );
+    },
+    [actor, optimistic],
+  );
+
+  const decideMany = useCallback(
+    async (list: StoredOrder[], approval: Approval, note: string | null) => {
+      if (!actor || !list.length) return;
+      const keys = new Set(list.map((o) => o.orderKey));
+      const before = orders;
       setOrders((prev) =>
         prev.map((o) =>
-          o.orderKey === order.orderKey
-            ? { ...o, paid, paidAt: at, paidByEmail: paid ? user.email : null }
+          keys.has(o.orderKey)
+            ? {
+                ...o,
+                approval,
+                approvalNote: note,
+                approvalBy: actor.email,
+                approvalAt: Date.now(),
+              }
             : o,
         ),
       );
       try {
-        await markOrderPaid({ order, paid, user: { uid: user.uid, email: user.email } });
+        await setApprovalMany(list, approval, note, actor);
       } catch (e) {
-        setOrders((prev) =>
-          prev.map((o) => (o.orderKey === order.orderKey ? order : o)),
-        );
+        setOrders(before);
         setError(friendlyError(e));
       }
     },
-    [user],
+    [actor, orders],
+  );
+
+  const correct = useCallback(
+    async (order: StoredOrder, change: CorrectionInput) => {
+      if (!actor) return;
+      await optimistic(
+        order,
+        {
+          ...(change.upi !== undefined ? { upiOverride: change.upi || null } : {}),
+          ...(change.amount !== undefined ? { amountOverride: change.amount } : {}),
+          correctedBy: actor.email,
+          correctedAt: Date.now(),
+        },
+        () => applyCorrection(order, change, actor),
+      );
+    },
+    [actor, optimistic],
+  );
+
+  const setPaid = useCallback(
+    async (order: StoredOrder, paid: boolean) => {
+      if (!actor) return;
+      await optimistic(
+        order,
+        {
+          paid,
+          paidAt: paid ? Date.now() : null,
+          paidByEmail: paid ? actor.email : null,
+          payFailedReason: null,
+        },
+        () => markOrderPaid(order, paid, actor),
+      );
+    },
+    [actor, optimistic],
+  );
+
+  const failPayment = useCallback(
+    async (order: StoredOrder, reason: string) => {
+      if (!actor) return;
+      await optimistic(
+        order,
+        { paid: false, paidAt: null, paidByEmail: null, payFailedReason: reason },
+        () => markPayFailed(order, reason, actor),
+      );
+    },
+    [actor, optimistic],
   );
 
   const byKey = useMemo(() => new Map(orders.map((o) => [o.orderKey, o])), [orders]);
+  const clearError = useCallback(() => setError(null), []);
 
   const value = useMemo(
-    () => ({ orders, ready, refreshing, lastSyncedAt, error, refresh, merge, setPaid, byKey }),
-    [orders, ready, refreshing, lastSyncedAt, error, refresh, merge, setPaid, byKey],
+    () => ({
+      orders,
+      ready,
+      refreshing,
+      lastSyncedAt,
+      error,
+      clearError,
+      refresh,
+      merge,
+      decide,
+      decideMany,
+      correct,
+      setPaid,
+      failPayment,
+      byKey,
+    }),
+    [
+      orders,
+      ready,
+      refreshing,
+      lastSyncedAt,
+      error,
+      clearError,
+      refresh,
+      merge,
+      decide,
+      decideMany,
+      correct,
+      setPaid,
+      failPayment,
+      byKey,
+    ],
   );
 
   return <OrdersContext.Provider value={value}>{children}</OrdersContext.Provider>;
@@ -186,12 +323,13 @@ const QueueContext = createContext<QueueValue | null>(null);
 const QUEUE_KEY = "ct.queue.v1";
 
 export function orderToQueueItem(order: StoredOrder): QueueItem {
+  const amount = payAmount(order);
   return {
     orderKey: order.orderKey,
     orderNumber: order.orderNumber,
-    vpa: order.upi,
+    vpa: payUpi(order),
     name: order.customerName,
-    amount: order.total ? order.total.toFixed(2) : "",
+    amount: amount ? amount.toFixed(2) : "",
     note: noteFor(order.orderNumber),
     pieces: order.pieces,
   };
@@ -289,7 +427,7 @@ function clamp(n: number, min: number, max: number): number {
 function friendlyError(e: unknown): string {
   const code = (e as { code?: string }).code ?? "";
   if (code === "permission-denied") {
-    return "Firestore refused that. Check the security rules are deployed and that you are signed in with a CarbonTree account.";
+    return "Firestore refused that. Either the security rules are not deployed, or your role is not allowed to make that change — operations approves, accounts pays.";
   }
   if (code === "unavailable" || code === "failed-precondition") {
     return "Could not reach Firestore. You are working from the cached copy — try Refresh again when you have signal.";

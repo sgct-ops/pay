@@ -2,50 +2,124 @@ rules_version = '2';
 
 // CarbonTree Payout Desk.
 //
-// The ledger holds customer names, phone numbers, emails and UPI handles, so
-// the default is deny and every collection opts in explicitly. Access is tied
-// to a verified Google account on the company domain — the `hd` parameter in
-// the sign-in call is only a hint to Google, this file is the actual control.
+// Two rules matter more than the rest:
+//
+//   1. Only a verified Google account on the company domain gets in at all.
+//   2. Operations approves and accounts pays, and NEITHER CAN DO THE OTHER'S
+//      STEP. That is enforced here, field by field, not in the React code —
+//      the screens only decide what to show.
 //
 // Deploy with:  firebase deploy --only firestore:rules
 //
-// Changing the company domain means changing it here as well as in
+// Changing the company domain means changing it here, in storage.rules, and in
 // NEXT_PUBLIC_ALLOWED_EMAIL_DOMAIN.
 
 service cloud.firestore {
   match /databases/{database}/documents {
 
-    function team() {
+    /* ------------------------------------------------------------ who --- */
+
+    function email() {
+      return request.auth.token.email.lower();
+    }
+
+    function signedIn() {
       return request.auth != null
         && request.auth.token.email_verified == true
-        && request.auth.token.email.lower().matches('^[^@]+@carbontree[.]com$');
+        && email().matches('^[^@]+@carbontree[.]com$');
     }
 
-    function isOwnEmail(field) {
-      return field == null || field == request.auth.token.email.lower();
+    function roleDoc() {
+      return get(/databases/$(database)/documents/roles/$(email())).data.role;
     }
 
-    // One document per order number. Written by uploads and by mark-paid.
-    // Nobody deletes an order: the ledger is the record of what was owed.
+    function hasRoleDoc() {
+      return exists(/databases/$(database)/documents/roles/$(email()));
+    }
+
+    // The owner is pinned so a careless edit on the People screen can never
+    // lock them out of their own project. Everyone else comes from /roles,
+    // falling back to the addresses the app ships with.
+    function role() {
+      return email() == 'shantanu@carbontree.com' ? 'admin'
+        : hasRoleDoc() ? roleDoc()
+        : email() == 'operations@carbontree.com' ? 'ops'
+        : email() == 'accounts@carbontree.com' ? 'accounts'
+        : email() == 'contact@carbontree.com' ? 'accounts'
+        : 'none';
+    }
+
+    function isAdmin()    { return signedIn() && role() == 'admin'; }
+    function isOps()      { return signedIn() && (role() == 'ops' || role() == 'admin'); }
+    function isAccounts() { return signedIn() && (role() == 'accounts' || role() == 'admin'); }
+
+    /* --------------------------------------------------------- orders --- */
+
+    // Fields only accounts may move. Everything about whether money left.
+    function moneyKeys() {
+      return ['paid', 'paidAt', 'paidByEmail'].toSet();
+    }
+
+    // Fields only operations may move: the decision, and the corrections that
+    // decision is made about.
+    function decisionKeys() {
+      return ['approval', 'approvalNote', 'approvalBy', 'approvalAt',
+              'upiOverride', 'amountOverride', 'correctedBy', 'correctedAt'].toSet();
+    }
+
+    function touched() {
+      return request.resource.data.diff(resource.data).affectedKeys();
+    }
+
     match /orders/{orderKey} {
-      allow read: if team();
-      allow create, update: if team();
+      allow read: if signedIn();
+
+      // Orders are only ever created by an upload, which is the operations job.
+      allow create: if isOps();
+
+      // Operations: may re-import, decide and correct — but may not touch a
+      // single field that says money moved.
+      allow update: if isOps() && !touched().hasAny(moneyKeys());
+
+      // Accounts: may only record the payment, only on something operations has
+      // already approved, and may not quietly change the amount on the way past.
+      allow update: if isAccounts()
+        && touched().hasOnly(moneyKeys().union(['payFailedReason', 'updatedAt'].toSet()))
+        && resource.data.approval == 'approved'
+        && request.resource.data.amountOverride == resource.data.amountOverride
+        && request.resource.data.upiOverride == resource.data.upiOverride
+        && request.resource.data.total == resource.data.total;
+
+      // Nobody deletes an order. The ledger is the record of what was owed.
       allow delete: if false;
     }
 
-    // One document per upload. Immutable once written.
+    /* -------------------------------------------------------- batches --- */
+
     match /batches/{batchId} {
-      allow read: if team();
-      allow create: if team() && isOwnEmail(request.resource.data.uploadedByEmail);
+      allow read: if signedIn();
+      allow create: if isOps() && request.resource.data.uploadedByEmail == email();
       allow update, delete: if false;
     }
 
-    // The payment audit log — append-only on purpose. If it could be edited it
-    // would not be worth keeping.
-    match /payments/{eventId} {
-      allow read: if team();
-      allow create: if team() && isOwnEmail(request.resource.data.byEmail);
+    /* --------------------------------------------------------- events --- */
+
+    // The audit trail is append-only on purpose. If it could be edited it would
+    // not be worth keeping. A writer can only sign an entry with their own
+    // address, so nobody can log an approval as somebody else.
+    match /events/{eventId} {
+      allow read: if signedIn();
+      allow create: if signedIn() && request.resource.data.byEmail == email();
       allow update, delete: if false;
+    }
+
+    /* ---------------------------------------------------------- roles --- */
+
+    match /roles/{personEmail} {
+      // Anyone signed in may read their own record — that is how the app knows
+      // which screens to show. Only an admin sees the whole list.
+      allow read: if isAdmin() || (signedIn() && personEmail == email());
+      allow write: if isAdmin() && personEmail != 'shantanu@carbontree.com';
     }
 
     match /{document=**} {

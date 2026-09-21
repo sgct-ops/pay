@@ -98,14 +98,81 @@ export interface TransformResult {
   missingColumns: string[];
 }
 
-/** Firestore `orders/{orderKey}` = PayoutOrder plus the payment state and provenance. */
+/** Where an order sits in the two-step workflow. */
+export type Approval = "pending" | "approved" | "hold" | "rejected";
+
+/** Firestore `orders/{orderKey}` = PayoutOrder plus workflow state and provenance. */
 export interface StoredOrder extends PayoutOrder {
+  /* --- operations' decision ------------------------------------------- */
+  approval: Approval;
+  /** Why it is on hold or rejected. Shown to accounts so nobody chases twice. */
+  approvalNote: string | null;
+  approvalBy: string | null;
+  approvalAt: number | null;
+
+  /**
+   * Corrections operations made before approving. The imported `upi` and
+   * `total` are left exactly as the export had them, so the change is always
+   * visible as a change rather than overwriting the evidence.
+   */
+  upiOverride: string | null;
+  amountOverride: number | null;
+  correctedBy: string | null;
+  correctedAt: number | null;
+
+  /* --- accounts' decision ---------------------------------------------- */
   paid: boolean;
   paidAt: number | null;
   paidByEmail: string | null;
+  /** Set when a transfer bounced, which sends the order back to operations. */
+  payFailedReason: string | null;
+
+  /* --- provenance ------------------------------------------------------- */
   batchIds: string[];
   firstSeenAt: number;
   updatedAt: number;
+  /** Set when a re-upload changed the amount or handle after approval. */
+  reopenedAt: number | null;
+}
+
+/** Who a person is, as stored. Seeded defaults live in lib/roles.ts. */
+export interface RoleRecord {
+  email: string;
+  role: "admin" | "ops" | "accounts";
+  name: string | null;
+  addedBy: string;
+  addedAt: number;
+}
+
+export type EventKind =
+  | "upload"
+  | "approve"
+  | "hold"
+  | "reject"
+  | "reopen"
+  | "correct"
+  | "pay"
+  | "unpay"
+  | "payfail"
+  | "role";
+
+/** Firestore `events/{autoId}` — one append-only trail for the whole desk. */
+export interface AuditEvent {
+  id?: string;
+  kind: EventKind;
+  orderKey: string | null;
+  orderNumber: string | null;
+  amount: number | null;
+  upi: string | null;
+  /** Free text: a hold reason, a rejection reason, a failed-transfer note. */
+  note: string | null;
+  /** For corrections and role changes: what it was, and what it became. */
+  from: string | null;
+  to: string | null;
+  at: number;
+  byUid: string;
+  byEmail: string;
+  byRole: string;
 }
 
 /** Firestore `batches/{batchId}` — one upload. */
@@ -123,15 +190,3 @@ export interface Batch {
   ordersUpdated: number;
 }
 
-/** Firestore `payments/{autoId}` — the audit log. */
-export interface PaymentEvent {
-  id?: string;
-  orderKey: string;
-  orderNumber: string;
-  amount: number;
-  upi: string;
-  action: "paid" | "unpaid";
-  at: number;
-  byUid: string;
-  byEmail: string;
-}

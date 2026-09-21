@@ -1,36 +1,56 @@
 "use client";
 
 import Link from "next/link";
-import { usePathname } from "next/navigation";
-import type { ReactNode } from "react";
+import { usePathname, useRouter } from "next/navigation";
+import { useEffect, useState, type ReactNode } from "react";
 import { useAuth } from "@/lib/auth-context";
 import { OrdersProvider, PayQueueProvider, useOrders } from "@/lib/store";
 import { ALLOWED_DOMAIN } from "@/lib/firebase";
+import { ASSIGNABLE_ROLES, ROLE_LABELS, homeFor, type Role } from "@/lib/roles";
 import { relativeTime } from "@/lib/format";
 import { useNow } from "@/lib/use-now";
 import { Mark } from "@/components/Mark";
 import { InstallHint } from "@/components/InstallHint";
 
-const TABS = [
-  { href: "/ledger", label: "Ledger", glyph: "▤" },
-  { href: "/pay", label: "Pay", glyph: "◈" },
-  { href: "/upload", label: "Upload", glyph: "↥" },
-  { href: "/activity", label: "Activity", glyph: "◷" },
-];
+interface Tab {
+  href: string;
+  label: string;
+  glyph: string;
+}
+
+/** The navigation is the clearest statement of what a role's job is. */
+function tabsFor(role: Role): Tab[] {
+  const ledger = { href: "/ledger", label: "Verify", glyph: "▤" };
+  const refunds = { href: "/refunds", label: "Refunds", glyph: "₹" };
+  const pay = { href: "/pay", label: "Pay", glyph: "◈" };
+  const upload = { href: "/upload", label: "Upload", glyph: "↥" };
+  const activity = { href: "/activity", label: "Activity", glyph: "◷" };
+
+  if (role === "ops") return [ledger, upload, activity];
+  if (role === "accounts") return [refunds, pay, activity];
+  if (role === "admin") return [ledger, refunds, pay, upload, activity];
+  return [];
+}
 
 export function AppShell({ children }: { children: ReactNode }) {
-  const { user, loading } = useAuth();
+  const { user, loading, role } = useAuth();
 
   if (loading) return <Splash />;
   if (!user) return <SignIn />;
+  if (role === "none") return <NoRole />;
 
   return (
     <OrdersProvider>
       <PayQueueProvider>
-        <div className="flex min-h-dvh flex-col">
+        {/* A fixed-height app shell rather than a scrolling page: the header and
+            the tab bar stay put, and a screen that says it fits one viewport
+            actually does. */}
+        <div className="flex h-dvh flex-col overflow-hidden">
           <Header />
-          <main className="mx-auto w-full max-w-[1400px] flex-1 px-4 pb-28 pt-4 sm:px-6 lg:pb-8">
-            {children}
+          <main className="min-h-0 flex-1 overflow-y-auto">
+            <div className="mx-auto h-full w-full max-w-[1400px] px-4 py-4 sm:px-6">
+              {children}
+            </div>
           </main>
           <MobileNav />
         </div>
@@ -42,30 +62,40 @@ export function AppShell({ children }: { children: ReactNode }) {
 /* -------------------------------------------------------------- header ---- */
 
 function Header() {
-  const { user, signOutNow } = useAuth();
+  const { user, role, realRole, viewingAs, viewAs, signOutNow } = useAuth();
   const pathname = usePathname();
+  const router = useRouter();
+  const [menu, setMenu] = useState(false);
 
   return (
-    <header className="sticky top-0 z-30 border-b border-line bg-paper/90 backdrop-blur">
+    <header className="shrink-0 border-b border-line bg-paper">
       <div className="mx-auto flex w-full max-w-[1400px] items-center gap-3 px-4 py-3 sm:px-6">
-        <Link href="/ledger" className="flex items-center gap-2.5">
+        <Link href={homeFor(role)} className="flex items-center gap-2.5">
           <Mark size={26} />
           <span className="display text-[15px] font-semibold leading-none text-ink">
             Payout Desk
           </span>
         </Link>
 
-        <nav className="ml-4 hidden items-center gap-1 lg:flex">
-          {TABS.map((t) => {
+        <span
+          className={`hidden rounded-full px-2 py-0.5 text-[11px] font-semibold sm:inline ${
+            viewingAs ? "bg-gold-wash text-gold" : "bg-slate-wash text-slate"
+          }`}
+          title={viewingAs ? `You are ${ROLE_LABELS[realRole]}, viewing as ${ROLE_LABELS[role]}` : undefined}
+        >
+          {ROLE_LABELS[role]}
+          {viewingAs && " (acting)"}
+        </span>
+
+        <nav className="ml-3 hidden items-center gap-1 lg:flex">
+          {tabsFor(role).map((t) => {
             const active = pathname.startsWith(t.href);
             return (
               <Link
                 key={t.href}
                 href={t.href}
                 className={`rounded-full px-3.5 py-1.5 text-[13px] font-medium transition ${
-                  active
-                    ? "bg-spruce text-white"
-                    : "text-ink-2 hover:bg-sunk hover:text-ink"
+                  active ? "bg-spruce text-white" : "text-ink-2 hover:bg-sunk hover:text-ink"
                 }`}
               >
                 {t.label}
@@ -74,15 +104,71 @@ function Header() {
           })}
         </nav>
 
-        <div className="ml-auto flex items-center gap-2">
+        <div className="relative ml-auto flex items-center gap-2">
           <SyncButton />
           <button
-            onClick={() => void signOutNow()}
-            title={`${user?.email} — sign out`}
+            onClick={() => setMenu((v) => !v)}
+            title={user?.email}
             className="grid h-8 w-8 place-items-center rounded-full bg-slate-wash text-[11px] font-semibold text-slate transition hover:bg-slate hover:text-white"
           >
             {(user?.name || "?").slice(0, 1).toUpperCase()}
           </button>
+
+          {menu && (
+            <>
+              <button
+                className="fixed inset-0 z-40 cursor-default"
+                onClick={() => setMenu(false)}
+                aria-label="Close menu"
+              />
+              <div className="absolute right-0 top-10 z-50 w-[248px] rounded-card border border-line bg-card p-1.5 shadow-[0_10px_30px_rgba(29,31,35,0.12)]">
+                <div className="px-2.5 py-2">
+                  <div className="truncate text-[12.5px] font-medium text-ink">{user?.name}</div>
+                  <div className="truncate text-[11.5px] text-ink-3">{user?.email}</div>
+                </div>
+
+                {realRole === "admin" && (
+                  <>
+                    <div className="mt-1 border-t border-line-soft px-2.5 pb-1 pt-2 text-[11px] uppercase tracking-[0.06em] text-ink-3">
+                      Work as
+                    </div>
+                    {(["admin", ...ASSIGNABLE_ROLES.filter((r) => r !== "admin")] as Role[]).map(
+                      (r) => (
+                        <button
+                          key={r}
+                          onClick={() => {
+                            viewAs(r === "admin" ? null : r);
+                            setMenu(false);
+                            router.push(homeFor(r));
+                          }}
+                          className={`flex w-full items-center justify-between rounded-md px-2.5 py-1.5 text-left text-[12.5px] transition hover:bg-sunk ${
+                            role === r ? "text-spruce" : "text-ink-2"
+                          }`}
+                        >
+                          {ROLE_LABELS[r]}
+                          {role === r && <span>✓</span>}
+                        </button>
+                      ),
+                    )}
+                    <Link
+                      href="/people"
+                      onClick={() => setMenu(false)}
+                      className="mt-1 block border-t border-line-soft px-2.5 py-2 text-[12.5px] text-ink-2 hover:text-ink"
+                    >
+                      People &amp; roles
+                    </Link>
+                  </>
+                )}
+
+                <button
+                  onClick={() => void signOutNow()}
+                  className="mt-1 w-full border-t border-line-soft px-2.5 py-2 text-left text-[12.5px] text-ink-2 hover:text-clay"
+                >
+                  Sign out
+                </button>
+              </div>
+            </>
+          )}
         </div>
       </div>
     </header>
@@ -108,10 +194,7 @@ export function SyncButton() {
           : "border-line bg-card text-ink-2 hover:border-spruce hover:text-spruce"
       }`}
     >
-      <span
-        className={`text-[13px] leading-none ${refreshing ? "animate-spin" : ""}`}
-        aria-hidden
-      >
+      <span className={`text-[13px] leading-none ${refreshing ? "animate-spin" : ""}`} aria-hidden>
         ↻
       </span>
       <span className="hidden sm:inline">
@@ -130,10 +213,13 @@ export function SyncButton() {
 
 function MobileNav() {
   const pathname = usePathname();
+  const { role } = useAuth();
+  const tabs = tabsFor(role);
+
   return (
-    <nav className="fixed inset-x-0 bottom-0 z-30 border-t border-line bg-card/95 pb-[env(safe-area-inset-bottom)] backdrop-blur lg:hidden">
-      <div className="grid grid-cols-4">
-        {TABS.map((t) => {
+    <nav className="shrink-0 border-t border-line bg-card pb-[env(safe-area-inset-bottom)] lg:hidden">
+      <div className="grid" style={{ gridTemplateColumns: `repeat(${tabs.length}, 1fr)` }}>
+        {tabs.map((t) => {
           const active = pathname.startsWith(t.href);
           return (
             <Link
@@ -155,7 +241,7 @@ function MobileNav() {
   );
 }
 
-/* ------------------------------------------------------------- sign in ---- */
+/* --------------------------------------------------------- gate screens --- */
 
 function Splash() {
   return (
@@ -163,6 +249,30 @@ function Splash() {
       <div className="flex items-center gap-3 text-ink-3">
         <Mark size={24} />
         <span className="text-sm">Opening the desk…</span>
+      </div>
+    </div>
+  );
+}
+
+function NoRole() {
+  const { user, signOutNow } = useAuth();
+  return (
+    <div className="grid min-h-dvh place-items-center px-5">
+      <div className="max-w-[420px] text-center">
+        <div className="mb-4 flex justify-center">
+          <Mark size={38} />
+        </div>
+        <h1 className="display text-[18px] font-semibold text-ink">No role yet</h1>
+        <p className="mt-2 text-[13.5px] leading-relaxed text-ink-2">
+          <span className="font-medium text-ink">{user?.email}</span> is signed in but has not been
+          given a role. Ask an admin to add you as operations or accounts on the People screen.
+        </p>
+        <button
+          onClick={() => void signOutNow()}
+          className="mt-5 rounded-lg border border-line px-4 py-2 text-[13px] text-ink-2 hover:text-ink"
+        >
+          Sign out
+        </button>
       </div>
     </div>
   );
@@ -233,4 +343,17 @@ function GoogleGlyph() {
       />
     </svg>
   );
+}
+
+/** Sends a signed-in user to the screen their role actually starts at. */
+export function RoleHome() {
+  const { role, loading, user } = useAuth();
+  const router = useRouter();
+
+  useEffect(() => {
+    if (loading || !user) return;
+    router.replace(homeFor(role));
+  }, [loading, user, role, router]);
+
+  return null;
 }

@@ -17,7 +17,7 @@ type Phase = "idle" | "reading" | "review" | "saving" | "done";
 
 export function Uploader() {
   const router = useRouter();
-  const { user } = useAuth();
+  const { user, role, can } = useAuth();
   const { orders, merge, refresh } = useOrders();
   const inputRef = useRef<HTMLInputElement>(null);
 
@@ -95,29 +95,45 @@ export function Uploader() {
         }
       }
 
-      const knownKeys = new Set(orders.map((o) => o.orderKey));
+      const known = new Map(orders.map((o) => [o.orderKey, o]));
       const batch = await saveBatch({
         orders: result.orders,
         summary: result.summary,
         stages,
         fileName: file?.name ?? "pasted-text",
         storagePath,
-        user: { uid: user.uid, email: user.email },
-        knownKeys,
+        actor: { uid: user.uid, email: user.email, role },
+        known,
       });
 
       const now = Date.now();
       merge(
         result.orders.map((o): StoredOrder => {
-          const existing = orders.find((x) => x.orderKey === o.orderKey);
+          const existing = known.get(o.orderKey);
+          // Mirror the server's rule locally: a changed amount or handle pulls
+          // an approval back, everything else about the decision is preserved.
+          const material =
+            existing && (existing.total !== o.total || existing.upi !== o.upi);
+          const reopened =
+            material && existing!.approval === "approved" && !existing!.paid;
           return {
             ...o,
+            approval: reopened ? "pending" : existing?.approval ?? "pending",
+            approvalNote: reopened ? "Re-opened: the export changed." : existing?.approvalNote ?? null,
+            approvalBy: existing?.approvalBy ?? null,
+            approvalAt: existing?.approvalAt ?? null,
+            upiOverride: existing?.upiOverride ?? null,
+            amountOverride: existing?.amountOverride ?? null,
+            correctedBy: existing?.correctedBy ?? null,
+            correctedAt: existing?.correctedAt ?? null,
             paid: existing?.paid ?? false,
             paidAt: existing?.paidAt ?? null,
             paidByEmail: existing?.paidByEmail ?? null,
+            payFailedReason: existing?.payFailedReason ?? null,
             batchIds: [...(existing?.batchIds ?? []), batch.id],
             firstSeenAt: existing?.firstSeenAt ?? now,
             updatedAt: now,
+            reopenedAt: reopened ? now : existing?.reopenedAt ?? null,
           };
         }),
       );
@@ -131,15 +147,24 @@ export function Uploader() {
     }
   };
 
+  if (!can.upload) {
+    return (
+      <p className="rounded-card border border-line bg-card px-5 py-10 text-center text-[13px] text-ink-2">
+        Uploading exports is the operations step.
+      </p>
+    );
+  }
+
   return (
-    <div className="mx-auto max-w-[900px] space-y-4">
+    <div className="mx-auto max-w-[900px] space-y-4 pb-10">
       <header>
         <h1 className="display text-[19px] font-semibold text-ink">Upload a Return Prime export</h1>
         <p className="mt-1 text-[13px] leading-relaxed text-ink-2">
           Drop the file in exactly as Return Prime exports it. It is read here in your browser,
-          filtered down to the manual UPI payouts, and only those go to Firestore — orders that
-          are already in the ledger are refreshed rather than duplicated, and anything already
-          marked paid stays paid.
+          filtered down to the manual UPI payouts, and only those go to Firestore. Orders already
+          in the ledger are refreshed rather than duplicated, and an approval or a paid tick is
+          never overwritten by a file — except when the export moves an amount or a handle, which
+          pulls that approval back for a second look.
         </p>
       </header>
 
@@ -317,7 +342,7 @@ function Review({
             onClick={onOpenLedger}
             className="ml-auto rounded-lg bg-spruce px-4 py-2 text-[13px] font-semibold text-white hover:bg-spruce-deep"
           >
-            Open the ledger →
+            Verify them →
           </button>
         </div>
       ) : (
