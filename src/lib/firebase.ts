@@ -20,23 +20,41 @@ import { getStorage, type FirebaseStorage } from "firebase/storage";
  *
  * The web config is not a secret — Firebase expects it to ship in the bundle,
  * and access is controlled by the security rules in firestore.rules, not by
- * hiding these values. They are still read from env vars so a second project
- * (staging, a fork) needs no code change.
+ * hiding these values. They are intentionally supplied only by environment
+ * variables: this repository must never choose a Firebase project on its own.
  */
+function requiredEnv(name: string, value: string | undefined): string {
+  if (!value) {
+    throw new Error(
+      `Missing ${name}. Add it to .env.local or the Vercel project environment variables.`,
+    );
+  }
+  return value;
+}
+
 export const firebaseConfig = {
-  apiKey: process.env.NEXT_PUBLIC_FIREBASE_API_KEY ?? "AIzaSyCt86XN67YFyTjbzfczUu_t_7QyB3GhLhI",
-  authDomain: process.env.NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN ?? "payout-891fa.firebaseapp.com",
-  projectId: process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID ?? "payout-891fa",
-  storageBucket:
-    process.env.NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET ?? "payout-891fa.firebasestorage.app",
-  messagingSenderId: process.env.NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID ?? "80190112062",
-  appId: process.env.NEXT_PUBLIC_FIREBASE_APP_ID ?? "1:80190112062:web:b96beb2420c165ea36ec6f",
-  measurementId: process.env.NEXT_PUBLIC_FIREBASE_MEASUREMENT_ID ?? "G-P7SNYPNMXK",
+  apiKey: requiredEnv("NEXT_PUBLIC_FIREBASE_API_KEY", process.env.NEXT_PUBLIC_FIREBASE_API_KEY),
+  authDomain: requiredEnv("NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN", process.env.NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN),
+  projectId: requiredEnv("NEXT_PUBLIC_FIREBASE_PROJECT_ID", process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID),
+  storageBucket: requiredEnv(
+    "NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET",
+    process.env.NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET,
+  ),
+  messagingSenderId: requiredEnv(
+    "NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID",
+    process.env.NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID,
+  ),
+  appId: requiredEnv("NEXT_PUBLIC_FIREBASE_APP_ID", process.env.NEXT_PUBLIC_FIREBASE_APP_ID),
+  measurementId: requiredEnv(
+    "NEXT_PUBLIC_FIREBASE_MEASUREMENT_ID",
+    process.env.NEXT_PUBLIC_FIREBASE_MEASUREMENT_ID,
+  ),
 };
 
 /** Only these email domains may sign in. Mirrored in firestore.rules and storage.rules. */
-export const ALLOWED_DOMAIN = (
-  process.env.NEXT_PUBLIC_ALLOWED_EMAIL_DOMAIN ?? "carbontree.com"
+export const ALLOWED_DOMAIN = requiredEnv(
+  "NEXT_PUBLIC_ALLOWED_EMAIL_DOMAIN",
+  process.env.NEXT_PUBLIC_ALLOWED_EMAIL_DOMAIN,
 ).toLowerCase();
 
 export function isAllowedEmail(email: string | null | undefined): boolean {

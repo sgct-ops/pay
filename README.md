@@ -60,7 +60,7 @@ npm install
 npm run dev          # http://localhost:3000
 ```
 
-It runs against the `payout-891fa` Firebase project out of the box. To point it elsewhere, copy `.env.local.example` to `.env.local`.
+Before starting locally, copy `.env.local.example` to `.env.local` and fill in the Firebase values for your project. The app refuses to start with missing configuration rather than silently targeting another Firebase project.
 
 | Command | What it does |
 |---|---|
@@ -76,7 +76,7 @@ It runs against the `payout-891fa` Firebase project out of the box. To point it 
 
 ### Vercel, on every push
 
-1. In Vercel, **Add New → Project**, import `sgct-ops/pay`, and deploy. Accept the detected Next.js settings; no environment variables are needed.
+1. In Vercel, **Add New → Project**, import `sgct-ops/pay`. Under **Environment Variables**, add every `NEXT_PUBLIC_...` variable from `.env.local.example` with the values from your Firebase project. Select **Production**; also select **Preview** if preview deployments need Firebase sign-in. Then deploy.
 2. That import *is* the automatic deployment — Vercel installs a GitHub app and from then on every push to `main` builds and goes live, and every push to another branch gets its own preview URL. There is nothing else to wire up, and no deploy token to keep in GitHub secrets.
 3. Add the resulting domain to **Firebase → Authentication → Settings → Authorized domains**, or sign-in will fail silently.
 
