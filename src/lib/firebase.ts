@@ -13,7 +13,6 @@ import {
   persistentMultipleTabManager,
   type Firestore,
 } from "firebase/firestore";
-import { getStorage, type FirebaseStorage } from "firebase/storage";
 
 /**
  * Firebase, initialised once and only in the browser.
@@ -23,42 +22,67 @@ import { getStorage, type FirebaseStorage } from "firebase/storage";
  * hiding these values. They are intentionally supplied only by environment
  * variables: this repository must never choose a Firebase project on its own.
  */
-function requiredEnv(name: string, value: string | undefined): string {
-  if (!value) {
-    throw new Error(
-      `Missing ${name}. Add it to .env.local or the Vercel project environment variables.`,
-    );
-  }
-  return value;
-}
-
-export const firebaseConfig = {
-  apiKey: requiredEnv("NEXT_PUBLIC_FIREBASE_API_KEY", process.env.NEXT_PUBLIC_FIREBASE_API_KEY),
-  authDomain: requiredEnv("NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN", process.env.NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN),
-  projectId: requiredEnv("NEXT_PUBLIC_FIREBASE_PROJECT_ID", process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID),
-  storageBucket: requiredEnv(
-    "NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET",
-    process.env.NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET,
-  ),
-  messagingSenderId: requiredEnv(
-    "NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID",
-    process.env.NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID,
-  ),
-  appId: requiredEnv("NEXT_PUBLIC_FIREBASE_APP_ID", process.env.NEXT_PUBLIC_FIREBASE_APP_ID),
-  measurementId: requiredEnv(
-    "NEXT_PUBLIC_FIREBASE_MEASUREMENT_ID",
-    process.env.NEXT_PUBLIC_FIREBASE_MEASUREMENT_ID,
-  ),
+/**
+ * Every value the app needs before it can reach Firebase, read once.
+ *
+ * These are read but not checked here. Checking at module scope would throw
+ * during `next build`, where a prerendered page imports this file and no
+ * NEXT_PUBLIC_* variable exists — which is a build machine having no secrets,
+ * not a misconfigured app. The check belongs where Firebase is actually
+ * reached, so it happens in getFirebaseApp() below.
+ */
+const ENV: Record<string, string | undefined> = {
+  NEXT_PUBLIC_FIREBASE_API_KEY: process.env.NEXT_PUBLIC_FIREBASE_API_KEY,
+  NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN: process.env.NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN,
+  NEXT_PUBLIC_FIREBASE_PROJECT_ID: process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID,
+  NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID: process.env.NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID,
+  NEXT_PUBLIC_FIREBASE_APP_ID: process.env.NEXT_PUBLIC_FIREBASE_APP_ID,
+  NEXT_PUBLIC_FIREBASE_MEASUREMENT_ID: process.env.NEXT_PUBLIC_FIREBASE_MEASUREMENT_ID,
+  NEXT_PUBLIC_ALLOWED_EMAIL_DOMAIN: process.env.NEXT_PUBLIC_ALLOWED_EMAIL_DOMAIN,
 };
 
-/** Only these email domains may sign in. Mirrored in firestore.rules and storage.rules. */
-export const ALLOWED_DOMAIN = requiredEnv(
-  "NEXT_PUBLIC_ALLOWED_EMAIL_DOMAIN",
-  process.env.NEXT_PUBLIC_ALLOWED_EMAIL_DOMAIN,
-).toLowerCase();
+/** Which of them are absent. Empty on a correctly configured deployment. */
+export const missingFirebaseEnv: string[] = Object.keys(ENV).filter((k) => !ENV[k]);
+
+export const firebaseConfig = {
+  apiKey: ENV.NEXT_PUBLIC_FIREBASE_API_KEY ?? "",
+  authDomain: ENV.NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN ?? "",
+  projectId: ENV.NEXT_PUBLIC_FIREBASE_PROJECT_ID ?? "",
+  // Optional, and unused: this app writes nothing to Firebase Storage. An
+  // export is transformed in the browser and the ledger goes to Firestore;
+  // the original file, if it is kept at all, is kept on the uploader’s own
+  // device, and only for 90 days. See src/lib/archive.ts.
+  storageBucket: process.env.NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET,
+  messagingSenderId: ENV.NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID ?? "",
+  appId: ENV.NEXT_PUBLIC_FIREBASE_APP_ID ?? "",
+  measurementId: ENV.NEXT_PUBLIC_FIREBASE_MEASUREMENT_ID ?? "",
+};
+
+/** Only this email domain may sign in. Mirrored in firestore.rules. */
+export const ALLOWED_DOMAIN = (ENV.NEXT_PUBLIC_ALLOWED_EMAIL_DOMAIN ?? "").toLowerCase();
 
 export function isAllowedEmail(email: string | null | undefined): boolean {
+  // With no configured domain every address would match "@", so an
+  // unconfigured app admits nobody rather than everybody.
+  if (!ALLOWED_DOMAIN) return false;
   return (email || "").toLowerCase().endsWith(`@${ALLOWED_DOMAIN}`);
+}
+
+/**
+ * Refuse to run against a half-configured project.
+ *
+ * This fires on the first real Firebase call — in the browser, where the
+ * variables are supposed to have arrived — rather than at import time. A
+ * missing value is a deployment that would otherwise fail deep inside the
+ * Firebase SDK with a message nobody can act on.
+ */
+function assertConfigured(): void {
+  if (!missingFirebaseEnv.length) return;
+  throw new Error(
+    `Missing ${missingFirebaseEnv.join(", ")}. Add ${
+      missingFirebaseEnv.length === 1 ? "it" : "them"
+    } to .env.local or the Vercel project environment variables.`,
+  );
 }
 
 let app: FirebaseApp | null = null;
@@ -66,6 +90,7 @@ let db: Firestore | null = null;
 
 export function getFirebaseApp(): FirebaseApp {
   if (app) return app;
+  assertConfigured();
   app = getApps().length ? getApp() : initializeApp(firebaseConfig);
   return app;
 }
@@ -100,10 +125,6 @@ export function googleProvider(): GoogleAuthProvider {
   // and in the security rules — a hint is not a control.
   provider.setCustomParameters({ hd: ALLOWED_DOMAIN, prompt: "select_account" });
   return provider;
-}
-
-export function getFirebaseStorage(): FirebaseStorage {
-  return getStorage(getFirebaseApp());
 }
 
 let analytics: Analytics | null = null;

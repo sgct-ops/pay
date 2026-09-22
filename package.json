@@ -10,7 +10,6 @@
     "test": "tsx scripts/verify-transform.ts && tsx scripts/verify-settings.ts",
     "icons": "python3 scripts/make-icons.py",
     "rules:deploy": "firebase deploy --only firestore:rules",
-    "storage:deploy": "firebase deploy --only storage",
     "test:rules": "firebase emulators:exec --only firestore \"node scripts/verify-rules.mjs\""
   },
   "dependencies": {

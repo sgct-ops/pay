@@ -2,13 +2,12 @@
 
 import { useCallback, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import { ref as storageRef, uploadBytes } from "firebase/storage";
 import { parseDelimited, readSheetFile } from "@/lib/sheet/parse";
 import { transform } from "@/lib/sheet/transform";
 import { ALL_STAGES } from "@/lib/sheet/types";
 import type { StoredOrder, TransformResult } from "@/lib/sheet/types";
 import { saveBatch } from "@/lib/data/orders";
-import { getFirebaseStorage } from "@/lib/firebase";
+import { archiveSupported, archiveUpload } from "@/lib/archive";
 import { useAuth } from "@/lib/auth-context";
 import { useOrders } from "@/lib/store";
 import { useSettings } from "@/lib/settings-context";
@@ -33,6 +32,7 @@ export function Uploader() {
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState<{ created: number; updated: number } | null>(null);
   const [archive, setArchive] = useState(true);
+  const [archived, setArchived] = useState(false);
 
   const run = useCallback(
     async (source: File | string, nextStages = stages) => {
@@ -84,31 +84,37 @@ export function Uploader() {
     setPhase("saving");
     setError(null);
     try {
-      let storagePath: string | null = null;
-      if (archive && file) {
-        try {
-          const path = `uploads/${new Date().toISOString().slice(0, 10)}/${Date.now()}-${file.name}`;
-          await uploadBytes(storageRef(getFirebaseStorage(), path), file, {
-            customMetadata: { uploadedBy: user.email },
-          });
-          storagePath = path;
-        } catch {
-          // An archive failure must not cost the whole upload — the ledger is
-          // the thing that matters, the raw file is a convenience.
-          storagePath = null;
-        }
-      }
-
       const known = new Map(orders.map((o) => [o.orderKey, o]));
       const batch = await saveBatch({
         orders: result.orders,
         summary: result.summary,
         stages,
         fileName: file?.name ?? "pasted-text",
-        storagePath,
         actor: { uid: user.uid, email: user.email, role },
         known,
       });
+
+      // The ledger is in Firestore by this point. Keeping the original file is
+      // a convenience on top of that, and it is kept on this device, so a
+      // failure here is worth a line on the screen and nothing more.
+      let kept = false;
+      if (archive && file && archiveSupported()) {
+        try {
+          await archiveUpload({
+            batchId: batch.id,
+            fileName: file.name,
+            fileType: file.type,
+            size: file.size,
+            uploadedAt: Date.now(),
+            uploadedByEmail: user.email,
+            blob: file,
+          });
+          kept = true;
+        } catch {
+          kept = false;
+        }
+      }
+      setArchived(kept);
 
       const now = Date.now();
       merge(
@@ -255,12 +261,18 @@ export function Uploader() {
         <label className="mt-3 flex items-center gap-2 text-[12.5px] text-ink-2">
           <input
             type="checkbox"
-            checked={archive}
+            checked={archive && !!file}
+            disabled={!file}
             onChange={(e) => setArchive(e.target.checked)}
-            className="h-3.5 w-3.5 accent-[#2f6b4f]"
+            className="h-3.5 w-3.5 accent-[#2f6b4f] disabled:opacity-40"
           />
-          Keep a copy of the original file in Firebase Storage
+          Keep a copy of the original file on this device
         </label>
+        <p className="mt-1 pl-[22px] text-[11.5px] leading-relaxed text-ink-3">
+          {file
+            ? "Kept in this browser, on this machine, and nowhere else — it is there to open when a figure looks wrong. The ledger in Firestore is the record; this copy is not, and clearing site data discards it."
+            : "Pasted text has no file to keep."}
+        </p>
       </div>
 
       {error && (
@@ -276,6 +288,7 @@ export function Uploader() {
           result={result}
           phase={phase}
           saved={saved}
+          archived={archived}
           onSave={save}
           onOpenLedger={() => router.push("/ledger")}
         />
@@ -288,12 +301,14 @@ function Review({
   result,
   phase,
   saved,
+  archived,
   onSave,
   onOpenLedger,
 }: {
   result: TransformResult;
   phase: Phase;
   saved: { created: number; updated: number } | null;
+  archived: boolean;
   onSave: () => void;
   onOpenLedger: () => void;
 }) {
@@ -351,6 +366,7 @@ function Review({
             Saved. <span className="font-semibold">{saved.created}</span> new order
             {saved.created === 1 ? "" : "s"}, <span className="font-semibold">{saved.updated}</span>{" "}
             refreshed. Paid ticks were left untouched.
+            {archived && " The file is kept on this device, under Admin → Data."}
           </p>
           <button
             onClick={onOpenLedger}

@@ -249,7 +249,6 @@ export interface SaveBatchInput {
   summary: TransformSummary;
   stages: string[];
   fileName: string;
-  storagePath: string | null;
   actor: Actor;
   /** Orders already known locally, so first-seen dates and approvals survive. */
   known: Map<string, StoredOrder>;
@@ -348,7 +347,6 @@ export async function saveBatch(input: SaveBatchInput): Promise<Batch> {
   const batch: Batch = {
     id: batchId,
     fileName: input.fileName,
-    storagePath: input.storagePath,
     uploadedAt: now,
     uploadedByUid: input.actor.uid,
     uploadedByEmail: input.actor.email,

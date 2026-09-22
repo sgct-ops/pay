@@ -116,7 +116,7 @@ Before starting locally, copy `.env.local.example` to `.env.local` and fill in t
 | `npm run build` | Production build |
 | `npm run lint` | ESLint, including the React Compiler rules |
 | `npm run icons` | Redraws the app icons from `scripts/make-icons.py` |
-| `npm run rules:deploy` | Pushes `firestore.rules` and `storage.rules` (needs the Firebase CLI) |
+| `npm run rules:deploy` | Pushes `firestore.rules` (needs the Firebase CLI) |
 
 ---
 
@@ -135,20 +135,23 @@ Before starting locally, copy `.env.local.example` to `.env.local` and fill in t
 1. **Authentication → Sign-in method → Google.** Enable it.
 2. **Authentication → Settings → Authorized domains.** Add your Vercel domain and any custom domain.
 3. **Firestore Database.** Create it — `asia-south1` (Mumbai) is closest. No collections need making by hand.
-4. **Storage.** Create the default bucket; it only holds archived export files.
-5. Deploy the rules:
+4. Deploy the rules:
 
 ```bash
 npx firebase login
-npx firebase use payout-891fa
 npm run rules:deploy
 ```
+
+There is no step for Firebase Storage, because nothing is written to it. An
+export is transformed in the browser and the ledger goes to Firestore; the
+original file, if the uploader keeps it, stays on their own machine. The project
+is pinned in `.firebaserc`, so `--project` is not needed.
 
 **Redeploy the rules after changing anything in this section, and after pulling a change that touches `firestore.rules`.** The admin panel needs the `settings/app` rule; without it the panel runs read-only on the defaults and says so.
 
 **Deploy the rules before putting real data in.** They are the access control — the React code only decides what to show. Until they are deployed the project runs on Firebase's defaults, which are either wide open or fully locked depending on how the database was created.
 
-Changing the company domain means changing it in three places: `NEXT_PUBLIC_ALLOWED_EMAIL_DOMAIN`, `firestore.rules`, and `storage.rules`.
+Changing the company domain means changing it in two places: `NEXT_PUBLIC_ALLOWED_EMAIL_DOMAIN` and `firestore.rules`.
 
 The Firebase web config is not a secret, despite containing a key called `apiKey`. Firebase is designed for it to ship in the browser bundle; the rules are what protect the data.
 
@@ -162,8 +165,15 @@ batches/{batchId}         one per upload: who, when, what the file contained
 events/{autoId}           append-only audit trail of every decision and payment
 roles/{email}             who is operations, who is accounts
 settings/app              one document: the guardrails and the desk's own rules
-uploads/… (Storage)       the original export files, untouched
 ```
+
+The original export files are not in this list, and not in Firebase at all. A
+kept copy sits in IndexedDB in the uploader's own browser and deletes itself 90
+days after the upload — it is there to answer "where did this figure come from"
+while that question is still live, and a raw export is customer PII that stops
+earning its keep long before the ledger does. `src/lib/archive.ts` is the whole
+of it. Admin → Data lists what this device is holding and can download or drop
+any of it.
 
 **Orders are keyed by order number**, which is what makes overlapping exports safe: upload June–August, then August–September, and the overlap is refreshed rather than duplicated. The upload write leaves out the payment fields *and* the approval fields for orders that already exist, so no file can quietly mark something approved or paid. The one exception is a material change — if a new export moves the amount or the handle on an already-approved order, the approval is pulled back to pending and the ledger says why.
 

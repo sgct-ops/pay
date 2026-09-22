@@ -5,6 +5,16 @@ import { listBatches, listEvents } from "@/lib/data/orders";
 import type { AuditEvent, Batch, EventKind } from "@/lib/sheet/types";
 import { useOrders } from "@/lib/store";
 import { downloadCsv, eventsToCsv, ordersToCsv, stampedName } from "@/lib/csv";
+import {
+  ARCHIVE_MAX_AGE_DAYS,
+  archiveSupported,
+  clearArchive,
+  daysLeft,
+  getArchived,
+  listArchived,
+  saveArchivedFile,
+  type ArchiveEntry,
+} from "@/lib/archive";
 import { dateTime, money, relativeTime, shortDate } from "@/lib/format";
 import { useNow } from "@/lib/use-now";
 import { firebaseConfig, ALLOWED_DOMAIN } from "@/lib/firebase";
@@ -46,6 +56,9 @@ export function DataTab({
 
   const [events, setEvents] = useState<AuditEvent[] | null>(null);
   const [batches, setBatches] = useState<Batch[] | null>(null);
+  // The archive is this browser's, not the project's, so it loads from
+  // IndexedDB rather than from Firestore and costs nothing to read.
+  const [archived, setArchived] = useState<ArchiveEntry[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [resyncing, setResyncing] = useState(false);
@@ -67,13 +80,49 @@ export function DataTab({
     [],
   );
 
+  const loadArchive = useCallback(async () => {
+    if (!archiveSupported()) return;
+    try {
+      setArchived(await listArchived());
+    } catch {
+      // A browser that refuses IndexedDB is not an error worth a banner. The
+      // archive simply is not there, and the Uploads list says as much.
+      setArchived([]);
+    }
+  }, []);
+
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect
     void load(draft.auditPageSize);
+    void loadArchive();
     // Deliberately once on mount: re-pulling the trail on every keystroke in
     // the page-size field would bill a read per character.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  const kept = useMemo(
+    () => new Map(archived.map((a) => [a.batchId, a])),
+    [archived],
+  );
+
+  const download = async (batchId: string) => {
+    try {
+      const record = await getArchived(batchId);
+      if (record) saveArchivedFile(record);
+      else await loadArchive();
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  };
+
+  const forgetArchive = async () => {
+    try {
+      await clearArchive();
+      setArchived([]);
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  };
 
   const counts = useMemo(() => {
     const paid = orders.filter((o) => o.paid);
@@ -216,7 +265,10 @@ export function DataTab({
         </div>
       </Section>
 
-      <Section title="Uploads" blurb="One entry per export, with what the file contained.">
+      <Section
+        title="Uploads"
+        blurb="One entry per export, with what the file contained. The transformed ledger is in Firestore and permanent; the original file, where one was kept, is on the machine it was uploaded from."
+      >
         <div className="max-h-[260px] overflow-y-auto rounded-lg border border-line">
           {!batches?.length ? (
             <p className="px-3 py-5 text-[12.5px] text-ink-3">
@@ -238,15 +290,41 @@ export function DataTab({
                 <span className="hidden text-ink-3 sm:inline">{b.stages.join("+")}</span>
                 <span className="text-ink-3">{b.uploadedByEmail}</span>
                 <span className="tnum text-ink-3">{shortDate(b.uploadedAt)}</span>
-                {b.storagePath && (
-                  <span className="text-[11px] text-ink-3" title={b.storagePath}>
-                    archived
-                  </span>
+                {kept.has(b.id) ? (
+                  <button
+                    onClick={() => void download(b.id)}
+                    className="shrink-0 text-[11px] font-medium text-spruce underline-offset-2 hover:underline"
+                    title={`The original file, on this device. Deletes itself in ${daysLeft(
+                      kept.get(b.id)!,
+                      now,
+                    )} day${daysLeft(kept.get(b.id)!, now) === 1 ? "" : "s"}.`}
+                  >
+                    download file
+                  </button>
+                ) : (
+                  <span className="shrink-0 text-[11px] text-ink-3">not on this device</span>
                 )}
               </div>
             ))
           )}
         </div>
+        <Note>
+          A kept file lives in this browser only — not in Firestore, not in Firebase Storage, and
+          not on anyone else&rsquo;s machine. It deletes itself {ARCHIVE_MAX_AGE_DAYS} days after
+          the upload, because a raw export is customer PII and stops earning its keep long before
+          the ledger does. Clearing site data takes it early.
+          {archived.length > 0 && (
+            <>
+              {" "}
+              <button
+                onClick={() => void forgetArchive()}
+                className="font-medium text-clay underline-offset-2 hover:underline"
+              >
+                Delete all {archived.length} now
+              </button>
+            </>
+          )}
+        </Note>
       </Section>
 
       <Section
@@ -255,15 +333,13 @@ export function DataTab({
       >
         <div className="overflow-hidden rounded-lg border border-line text-[12.5px]">
           <Env label="Firebase project" value={firebaseConfig.projectId} />
-          <Env label="Storage bucket" value={firebaseConfig.storageBucket} />
           <Env label="Sign-in domain" value={`@${ALLOWED_DOMAIN}`} />
           <Env label="Owner, pinned in code and rules" value={FIXED_ADMIN} />
         </div>
         <Note>
-          Changing the company domain means changing it in three places:{" "}
-          <code className="font-mono text-[11.5px]">NEXT_PUBLIC_ALLOWED_EMAIL_DOMAIN</code>,{" "}
-          <code className="font-mono text-[11.5px]">firestore.rules</code> and{" "}
-          <code className="font-mono text-[11.5px]">storage.rules</code>.
+          Changing the company domain means changing it in two places:{" "}
+          <code className="font-mono text-[11.5px]">NEXT_PUBLIC_ALLOWED_EMAIL_DOMAIN</code> and{" "}
+          <code className="font-mono text-[11.5px]">firestore.rules</code>.
         </Note>
       </Section>
     </div>

@@ -248,7 +248,6 @@ export interface AuditEvent {
 export interface Batch {
   id: string;
   fileName: string;
-  storagePath: string | null;
   uploadedAt: number;
   uploadedByUid: string;
   uploadedByEmail: string;

@@ -9,7 +9,13 @@ import {
   useState,
   type ReactNode,
 } from "react";
-import { onAuthStateChanged, signInWithPopup, signOut, type User } from "firebase/auth";
+import {
+  onAuthStateChanged,
+  signInWithPopup,
+  signOut,
+  type Auth,
+  type User,
+} from "firebase/auth";
 import {
   ALLOWED_DOMAIN,
   getFirebaseAuth,
@@ -62,7 +68,18 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    const auth = getFirebaseAuth();
+    let auth: Auth;
+    try {
+      auth = getFirebaseAuth();
+    } catch (e) {
+      // A deployment whose Firebase variables never arrived. The message names
+      // exactly which ones, and belongs on the sign-in screen — throwing here
+      // would take the whole tree down and say nothing.
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setError((e as Error).message);
+      setLoading(false);
+      return;
+    }
     const unsub = onAuthStateChanged(auth, (u) => {
       if (!u) {
         setUser(null);
