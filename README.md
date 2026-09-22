@@ -31,7 +31,7 @@ A Next.js app on Vercel, backed by Firebase, installable as an app on a phone.
 | Build a QR and mark paid | — | ✔ |
 | Send a failed transfer back | — | ✔ |
 
-`shantanu@carbontree.com` is admin: both desks, plus the People screen and the full audit trail, and a *Work as* switcher in the avatar menu for seeing exactly what each role sees.
+`shantanu@carbontree.com` is admin: both desks, plus the **admin panel** and the full audit trail, and a *Work as* switcher in the avatar menu for seeing exactly what each role sees.
 
 Seeded roles, changeable on the People screen without a redeploy:
 
@@ -53,6 +53,53 @@ If accounts hits a bounced transfer, **Payment failed** sends the order back wit
 
 ---
 
+## The admin panel
+
+`/admin`, admin only. Six tabs, one save.
+
+| Tab | What it holds |
+|---|---|
+| **Overview** | What the desk is doing right now, every rule in force, and what an admin deliberately *cannot* change |
+| **People** | Who is allowed in and which desk they work — the old `/people` screen, which now redirects here |
+| **Payouts** | The ceiling, the warning threshold, when an approval must carry a reason, whether a cancelled shipment blocks approval |
+| **Transform** | Default return stages, and the list of notes that mean "not a payout" — with a box to paste a real note and see which rule catches it |
+| **Payments** | The tag on every payout note, the note length limit, which UPI app opens by default, whether ad-hoc payees are allowed |
+| **Data** | Ledger and audit-trail CSV export, upload history, sync staleness, full resync, and the read-only environment |
+
+Settings live in one document, `settings/app`, watched live — a ceiling set on a laptop reaches the phone paying refunds without a reload. Everything else on the panel edits an in-memory draft and writes nothing until **Save**; a guardrail that took effect halfway through being typed would be worse than none. People is the exception, because each role change is individually meaningful and gets its own audit entry.
+
+Every change is written to the same append-only trail as approvals and payments, and the entry names the figures: `ceiling ₹10,000 → ₹25,000`, not "settings changed".
+
+### The guardrails are enforced by the database
+
+The amount limits, the cancelled-shipment check and the required-reason threshold are **not** UI validation. They are in `firestore.rules`, checked at the moment an order becomes approved:
+
+```
+allow update: if isOps()
+  && !touched().hasAny(moneyKeys())
+  && (!approvingNow() || withinGuardrails());
+```
+
+So an operations session that skipped the screen is refused by Firestore, exactly as an accounts session that tried to raise an amount already is. `blockingReason()` in `src/lib/order-view.ts` explains the refusal; the rules perform it — **if you change one, change the other, or the button will lie.**
+
+Two deliberate limits on the ceiling:
+
+- It applies **only at the moment of approving**. Lowering it later does not unapprove anything, and does not break re-uploading an order approved under the old ceiling. Pull those back on the ledger if that is what you want — the Payouts tab tells you how many there are.
+- It is measured on what would actually be **paid** — a correction operations made, not whatever the export said. `payable()` in the rules mirrors `payAmount()` in the code.
+
+### What no setting can do
+
+- Grant accounts the ability to approve, or operations the ability to pay.
+- Change the owner address, which is pinned in code and in the rules.
+- Edit or delete an audit entry, or delete an order.
+- Delete the settings document. Turning a guardrail off means setting it to 0, visibly.
+
+### Defaults
+
+An unconfigured project behaves exactly as the app did before the panel existed: no ceiling, no warning, no required reason, cancelled shipments flagged but approvable, the same six exclusion rules, `CARBONTREE` as the tag. `mergeSettings` coerces anything malformed back to those defaults rather than letting a string reach a refund ceiling — `npm test` pins that.
+
+---
+
 ## Quick start
 
 ```bash
@@ -64,7 +111,8 @@ Before starting locally, copy `.env.local.example` to `.env.local` and fill in t
 
 | Command | What it does |
 |---|---|
-| `npm test` | Runs the Return Prime transform against a fixture covering every awkward case |
+| `npm test` | Runs the Return Prime transform against a fixture covering every awkward case, then the desk-settings coercion and validation checks |
+| `npm run test:rules` | Runs `firestore.rules` against the Firestore emulator — the two-desk split, the guardrails, the audit trail. Needs Java |
 | `npm run build` | Production build |
 | `npm run lint` | ESLint, including the React Compiler rules |
 | `npm run icons` | Redraws the app icons from `scripts/make-icons.py` |
@@ -96,6 +144,8 @@ npx firebase use payout-891fa
 npm run rules:deploy
 ```
 
+**Redeploy the rules after changing anything in this section, and after pulling a change that touches `firestore.rules`.** The admin panel needs the `settings/app` rule; without it the panel runs read-only on the defaults and says so.
+
 **Deploy the rules before putting real data in.** They are the access control — the React code only decides what to show. Until they are deployed the project runs on Firebase's defaults, which are either wide open or fully locked depending on how the database was created.
 
 Changing the company domain means changing it in three places: `NEXT_PUBLIC_ALLOWED_EMAIL_DOMAIN`, `firestore.rules`, and `storage.rules`.
@@ -111,6 +161,7 @@ orders/{orderNumber}      the ledger: the order, the decision, the correction, t
 batches/{batchId}         one per upload: who, when, what the file contained
 events/{autoId}           append-only audit trail of every decision and payment
 roles/{email}             who is operations, who is accounts
+settings/app              one document: the guardrails and the desk's own rules
 uploads/… (Storage)       the original export files, untouched
 ```
 
@@ -149,9 +200,9 @@ A line is kept when **all three** hold:
 
 The UPI handle is then recovered from `refund_additional_details`, because the export's own `upi` column arrives empty on every row. A handle is `something@bank` where the bank part has **no dots** — that single rule is what separates `rahul.verma@okaxis` from `rahul@gmail.com`, and it is worth the test that guards it.
 
-Lines are combined per order. A line counts toward the payable total only if it has a positive amount and its note does not say otherwise — `adjusted in another product`, `store credit`, `marketing`, `no refund needed`, `exchanged`, `alter and send`. Excluded lines are not dropped; they stay on the expanded row with the reason, so a ₹2,625 payout can be checked against the two pieces it came from.
+Lines are combined per order. A line counts toward the payable total only if it has a positive amount and its note does not say otherwise — `adjusted in another product`, `store credit`, `marketing`, `no refund needed`, `exchanged`, `alter and send`. Those six are the defaults; they are editable on the admin panel's **Transform** tab, matched literally rather than as regular expressions, and `npm test` pins the defaults to the exact behaviour the old regexes had. Excluded lines are not dropped; they stay on the expanded row with the reason, so a ₹2,625 payout can be checked against the two pieces it came from.
 
-`status` (the return's own stage) and `shipment_tracking_status` (where the courier is) are different columns and easy to confuse. A cancelled shipment that still carries a handle gets a red chip — the goods never reached the warehouse, so it is worth a look before approving.
+`status` (the return's own stage) and `shipment_tracking_status` (where the courier is) are different columns and easy to confuse. A cancelled shipment that still carries a handle gets a red chip — the goods never reached the warehouse, so it is worth a look before approving. An admin can turn that chip into a refusal on the **Payouts** tab.
 
 `npm test` pins all of this down against a fixture. It takes ten seconds and it is the thing standing between a regex tweak and a refund sent to the wrong handle.
 
@@ -174,14 +225,18 @@ The pay screen is built to fit one viewport with nothing to scroll: who and how 
 
 ```
 src/app/                  routes — (app)/ is everything behind the sign-in gate
-src/components/           Ledger (operations), Refunds (accounts), PayDesk, Uploader, People
+src/components/           Ledger (operations), Refunds (accounts), PayDesk, Uploader
+src/components/admin/     the admin panel, one file per tab
 src/lib/sheet/            parsing and the Return Prime transform — no React, no Firebase
 src/lib/data/orders.ts    every Firestore read and write, in one file
 src/lib/roles.ts          who can do what
+src/lib/settings.ts       the desk settings, their defaults, coercion and validation
+src/lib/settings-context.tsx  the live settings document, read once and watched
+src/lib/csv.ts            ledger and audit-trail export
 src/lib/order-view.ts     payAmount() / payUpi() — always use these, never `total` and `upi`
 src/lib/store.tsx         the cached ledger and the pay queue
 firestore.rules           the real access control — read this before trusting the app with data
-scripts/                  the transform test and the icon generator
+scripts/                  the transform test, the settings test, the rules test, the icon generator
 ```
 
 `src/lib/sheet/` is deliberately free of React and Firebase, which is why `npm test` is possible at all.
@@ -194,3 +249,4 @@ scripts/                  the transform test and the icon generator
 - No writing back to Return Prime or Shopify, and no reconciliation against bank statements.
 - No `.xls`/`.xlsx` parsing without a network on first use — the spreadsheet reader loads from a CDN on demand. CSV works offline.
 - No push notifications. The manifest and service worker are in place if they are ever wanted.
+- No per-person permissions beyond the three roles. The split is the product; a matrix of checkboxes would dissolve it.

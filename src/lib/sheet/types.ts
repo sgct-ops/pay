@@ -21,6 +21,74 @@ export const ALL_STAGES = [
 
 export type Stage = (typeof ALL_STAGES)[number];
 
+/**
+ * One reason a line is not a payout, whatever its amount says.
+ *
+ * These were regexes buried in the transform. They are data now, because the
+ * list is a business rule that changes — "settled as store credit" is a
+ * decision someone made about how returns are handled, not a fact about the
+ * code. The admin panel edits them; the defaults below reproduce exactly what
+ * the transform did before they were editable, so `npm test` still pins them.
+ *
+ * `phrase` is matched case-insensitively against the line's note. `wholeWord`
+ * wraps it in word boundaries — on for "marketing", which must not fire on
+ * "remarketing"; off for "exchang", which is a deliberate stem catching both
+ * "exchange" and "exchanged".
+ */
+export interface ExclusionRule {
+  id: string;
+  phrase: string;
+  /** Shown on the excluded line, so the exclusion explains itself. */
+  reason: string;
+  wholeWord: boolean;
+  enabled: boolean;
+}
+
+export const DEFAULT_EXCLUSIONS: ExclusionRule[] = [
+  {
+    id: "adjusted",
+    phrase: "adjusted in another product",
+    reason: "adjusted against another product",
+    wholeWord: false,
+    enabled: true,
+  },
+  {
+    id: "store-credit",
+    phrase: "store credit",
+    reason: "settled as store credit",
+    wholeWord: true,
+    enabled: true,
+  },
+  {
+    id: "marketing",
+    phrase: "marketing",
+    reason: "marketing, not a refund",
+    wholeWord: true,
+    enabled: true,
+  },
+  {
+    id: "no-refund",
+    phrase: "no refund needed",
+    reason: "marked no refund needed",
+    wholeWord: false,
+    enabled: true,
+  },
+  {
+    id: "exchange",
+    phrase: "exchang",
+    reason: "exchanged, not refunded",
+    wholeWord: false,
+    enabled: true,
+  },
+  {
+    id: "alteration",
+    phrase: "alter and send",
+    reason: "alteration, not a refund",
+    wholeWord: false,
+    enabled: true,
+  },
+];
+
 export interface OrderLine {
   /** Stable id for the line, used as the key for paid-ticks and dedupe. */
   key: string;
@@ -154,7 +222,8 @@ export type EventKind =
   | "pay"
   | "unpay"
   | "payfail"
-  | "role";
+  | "role"
+  | "settings";
 
 /** Firestore `events/{autoId}` — one append-only trail for the whole desk. */
 export interface AuditEvent {

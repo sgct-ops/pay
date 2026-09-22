@@ -9,12 +9,17 @@ import type { Approval, StoredOrder } from "@/lib/sheet/types";
 import {
   APPROVAL_LABELS,
   APPROVAL_TONES,
+  approvableNow,
+  approvalNeedsNote,
+  approvalWarning,
   blockingReason,
   isCorrected,
   payAmount,
   payUpi,
 } from "@/lib/order-view";
 import { money, shortDate } from "@/lib/format";
+import { useSettings } from "@/lib/settings-context";
+import type { AppSettings } from "@/lib/settings";
 
 type Filter = Approval | "all";
 
@@ -34,6 +39,7 @@ export function Ledger() {
   const [asking, setAsking] = useState<{ order: StoredOrder | null; approval: Approval } | null>(
     null,
   );
+  const { settings } = useSettings();
 
   const counts = useMemo(
     () => ({
@@ -46,8 +52,11 @@ export function Ledger() {
         .reduce((s, o) => s + payAmount(o), 0),
       noUpi: orders.filter((o) => o.approval !== "rejected" && !payUpi(o) && payAmount(o) > 0)
         .length,
+      blocked: orders.filter(
+        (o) => o.approval === "pending" && blockingReason(o, settings) !== null,
+      ).length,
     }),
-    [orders],
+    [orders, settings],
   );
 
   const visible = useMemo(() => {
@@ -66,6 +75,12 @@ export function Ledger() {
 
   const weeks = useMemo(() => groupByWeek(visible), [visible]);
   const picked = useMemo(() => visible.filter((o) => selected[o.orderKey]), [visible, selected]);
+  const pickedApprovable = useMemo(() => approvableNow(picked, settings), [picked, settings]);
+  const pickedBlocked = picked.length - pickedApprovable.length;
+  const pickedNeedsNote = useMemo(
+    () => pickedApprovable.some((o) => approvalNeedsNote(o, settings)),
+    [pickedApprovable, settings],
+  );
 
   if (!ready) return <Skeleton />;
 
@@ -77,12 +92,21 @@ export function Ledger() {
         <Tile label="On hold" value={String(counts.hold)} warn={counts.hold > 0} />
         <Tile label="Approved, unpaid" value={String(counts.approved)} />
         <Tile
-          label={counts.failed ? "Failed transfers" : "No UPI yet"}
-          value={String(counts.failed || counts.noUpi)}
-          warn={Boolean(counts.failed || counts.noUpi)}
+          label={counts.failed ? "Failed transfers" : counts.blocked ? "Blocked" : "No UPI yet"}
+          value={String(counts.failed || counts.blocked || counts.noUpi)}
+          warn={Boolean(counts.failed || counts.blocked || counts.noUpi)}
           span
         />
       </div>
+
+      {settings.maxRefundAmount > 0 && (
+        <p className="px-1 text-[12px] text-ink-3">
+          A refund over {money(settings.maxRefundAmount)} cannot be approved
+          {settings.blockCancelledShipment && ", and nor can one whose shipment was cancelled"}.
+          {settings.approvalNoteAbove > 0 &&
+            ` Above ${money(settings.approvalNoteAbove)} an approval has to carry a reason.`}
+        </p>
+      )}
 
       <div className="flex flex-wrap items-center gap-2">
         <input
@@ -128,8 +152,8 @@ export function Ledger() {
       ) : (
         <div className="space-y-5">
           {weeks.map((week) => {
-            const approvable = week.orders.filter(
-              (o) => !blockingReason(o) && o.approval !== "approved",
+            const approvable = approvableNow(week.orders, settings).filter(
+              (o) => o.approval !== "approved",
             );
             return (
               <section key={String(week.weekStart)}>
@@ -168,6 +192,7 @@ export function Ledger() {
                       order={order}
                       first={i === 0}
                       canVerify={can.verify}
+                      settings={settings}
                       selected={Boolean(selected[order.orderKey])}
                       expanded={open === order.orderKey}
                       onToggleSelect={() =>
@@ -181,7 +206,11 @@ export function Ledger() {
                       onToggleExpand={() =>
                         setOpen((cur) => (cur === order.orderKey ? null : order.orderKey))
                       }
-                      onApprove={() => void decide(order, "approved", null)}
+                      onApprove={() =>
+                        approvalNeedsNote(order, settings)
+                          ? setAsking({ order, approval: "approved" })
+                          : void decide(order, "approved", null)
+                      }
                       onAsk={(approval) => setAsking({ order, approval })}
                     />
                   ))}
@@ -200,6 +229,11 @@ export function Ledger() {
               <span className="font-semibold">
                 {money(picked.reduce((s, o) => s + payAmount(o), 0))}
               </span>
+              {pickedBlocked > 0 && (
+                <span className="ml-2 font-normal text-clay">
+                  {pickedBlocked} cannot be approved
+                </span>
+              )}
             </div>
             <button
               onClick={() => setSelected({})}
@@ -215,16 +249,20 @@ export function Ledger() {
             </button>
             <button
               onClick={() => {
-                void decideMany(
-                  picked.filter((o) => !blockingReason(o)),
-                  "approved",
-                  null,
-                );
+                // A single blocked order in the batch would have the whole
+                // atomic write refused, so they are filtered out here as well
+                // as being un-tickable individually.
+                if (pickedNeedsNote) {
+                  setAsking({ order: null, approval: "approved" });
+                  return;
+                }
+                void decideMany(pickedApprovable, "approved", null);
                 setSelected({});
               }}
-              className="rounded-lg bg-spruce px-4 py-2 text-[13px] font-semibold text-white transition hover:bg-spruce-deep"
+              disabled={!pickedApprovable.length}
+              className="rounded-lg bg-spruce px-4 py-2 text-[13px] font-semibold text-white transition hover:bg-spruce-deep disabled:opacity-40"
             >
-              Approve {picked.filter((o) => !blockingReason(o)).length} →
+              Approve {pickedApprovable.length} →
             </button>
           </div>
         </div>
@@ -233,12 +271,25 @@ export function Ledger() {
       {asking && (
         <ReasonDialog
           approval={asking.approval}
-          count={asking.order ? 1 : picked.length}
+          count={asking.order ? 1 : asking.approval === "approved" ? pickedApprovable.length : picked.length}
+          amount={
+            asking.order
+              ? payAmount(asking.order)
+              : (asking.approval === "approved" ? pickedApprovable : picked).reduce(
+                  (sum, o) => sum + payAmount(o),
+                  0,
+                )
+          }
+          threshold={settings.approvalNoteAbove}
           onCancel={() => setAsking(null)}
           onConfirm={async (note) => {
             if (asking.order) await decide(asking.order, asking.approval, note);
             else {
-              await decideMany(picked, asking.approval, note);
+              await decideMany(
+                asking.approval === "approved" ? pickedApprovable : picked,
+                asking.approval,
+                note,
+              );
               setSelected({});
             }
             setAsking(null);
@@ -255,6 +306,7 @@ function Row({
   order,
   first,
   canVerify,
+  settings,
   selected,
   expanded,
   onToggleSelect,
@@ -265,6 +317,7 @@ function Row({
   order: StoredOrder;
   first: boolean;
   canVerify: boolean;
+  settings: AppSettings;
   selected: boolean;
   expanded: boolean;
   onToggleSelect: () => void;
@@ -272,7 +325,9 @@ function Row({
   onApprove: () => void;
   onAsk: (approval: Approval) => void;
 }) {
-  const blocked = blockingReason(order);
+  const blocked = blockingReason(order, settings);
+  const warning = blocked ? null : approvalWarning(order, settings);
+  const needsNote = approvalNeedsNote(order, settings);
 
   return (
     <div className={first ? "" : "border-t border-line-soft"}>
@@ -307,10 +362,10 @@ function Row({
             <button
               onClick={onApprove}
               disabled={!canVerify || Boolean(blocked)}
-              title={blocked ?? "Approve for payment"}
+              title={blocked ?? (needsNote ? "Approve — this one needs a reason" : "Approve for payment")}
               className="rounded-md border border-spruce/25 bg-spruce-wash px-2.5 py-1 text-[12px] font-semibold text-spruce transition hover:bg-spruce hover:text-white disabled:border-line disabled:bg-sunk disabled:text-ink-3"
             >
-              Approve
+              Approve{needsNote && !blocked ? "…" : ""}
             </button>
           )}
           <button
@@ -353,6 +408,22 @@ function Row({
             transfer failed
           </span>
         )}
+        {blocked && order.approval !== "approved" && order.approval !== "rejected" && (
+          <span
+            className="shrink-0 rounded bg-clay-wash px-1.5 py-0.5 text-[11px] text-clay"
+            title={blocked}
+          >
+            blocked
+          </span>
+        )}
+        {warning && order.approval === "pending" && (
+          <span
+            className="hidden shrink-0 rounded bg-gold-wash px-1.5 py-0.5 text-[11px] text-gold sm:inline"
+            title={warning}
+          >
+            check
+          </span>
+        )}
         {order.shipRank >= 4 && (
           <span
             className="hidden shrink-0 rounded bg-clay-wash px-1.5 py-0.5 text-[11px] text-clay md:inline"
@@ -374,14 +445,26 @@ function Row({
         </span>
       </div>
 
-      {expanded && <Detail order={order} canVerify={canVerify} />}
+      {expanded && (
+        <Detail order={order} canVerify={canVerify} blocked={blocked} warning={warning} />
+      )}
     </div>
   );
 }
 
 /* -------------------------------------------------------------- detail ---- */
 
-function Detail({ order, canVerify }: { order: StoredOrder; canVerify: boolean }) {
+function Detail({
+  order,
+  canVerify,
+  blocked,
+  warning,
+}: {
+  order: StoredOrder;
+  canVerify: boolean;
+  blocked: string | null;
+  warning: string | null;
+}) {
   const { correct } = useOrders();
   const [upi, setUpi] = useState(payUpi(order));
   const [amount, setAmount] = useState(String(payAmount(order)));
@@ -392,6 +475,16 @@ function Detail({ order, canVerify }: { order: StoredOrder; canVerify: boolean }
 
   return (
     <div className="border-t border-line-soft bg-sunk/50 px-3 py-3">
+      {blocked && order.approval !== "rejected" && (
+        <p className="mb-3 rounded-lg border border-clay/30 bg-clay-wash px-2.5 py-2 text-[12px] text-clay">
+          Cannot be approved: {blocked}
+        </p>
+      )}
+      {warning && !blocked && (
+        <p className="mb-3 rounded-lg border border-gold/30 bg-gold-wash px-2.5 py-2 text-[12px] text-gold">
+          {warning}
+        </p>
+      )}
       {(order.approvalNote || order.payFailedReason) && (
         <div className="mb-3 space-y-1.5">
           {order.approvalNote && (
@@ -537,39 +630,52 @@ function Detail({ order, canVerify }: { order: StoredOrder; canVerify: boolean }
 function ReasonDialog({
   approval,
   count,
+  amount,
+  threshold,
   onCancel,
   onConfirm,
 }: {
   approval: Approval;
   count: number;
+  amount: number;
+  threshold: number;
   onCancel: () => void;
   onConfirm: (note: string) => Promise<void>;
 }) {
   const holding = approval === "hold";
-  const presets = holding
+  const approving = approval === "approved";
+  const presets = approving
     ? [
-        "Waiting on the customer's UPI ID",
-        "Shipment cancelled — checking with the warehouse",
-        "Amount queried with the customer",
+        "Checked the line items against the return",
+        "Customer confirmed the handle and the amount",
+        "Verified with the warehouse that the goods arrived",
       ]
-    : [
-        "Not a refund — exchange or alteration",
-        "Already settled another way",
-        "Duplicate of another order",
-      ];
+    : holding
+      ? [
+          "Waiting on the customer's UPI ID",
+          "Shipment cancelled — checking with the warehouse",
+          "Amount queried with the customer",
+        ]
+      : [
+          "Not a refund — exchange or alteration",
+          "Already settled another way",
+          "Duplicate of another order",
+        ];
   const [note, setNote] = useState("");
 
   return (
     <div className="fixed inset-0 z-50 grid place-items-center bg-ink/30 px-4">
       <div className="w-full max-w-[420px] rounded-card border border-line bg-card p-5">
         <h3 className="display text-[15px] font-semibold text-ink">
-          {holding ? "Put on hold" : "Reject"}
+          {approving ? "Approve for payment" : holding ? "Put on hold" : "Reject"}
           {count > 1 && ` — ${count} orders`}
         </h3>
         <p className="mt-1 text-[12.5px] leading-relaxed text-ink-2">
-          {holding
-            ? "It stays in the ledger and out of the accounts queue until you approve it. The reason is what stops someone chasing it twice."
-            : "It leaves the queue entirely. Say why, so the decision still makes sense in three months."}
+          {approving
+            ? `${money(amount)} is above the ${money(threshold)} an admin set as needing a written reason. Once approved, accounts can pay it and UPI has no way to take it back — so say what you checked.`
+            : holding
+              ? "It stays in the ledger and out of the accounts queue until you approve it. The reason is what stops someone chasing it twice."
+              : "It leaves the queue entirely. Say why, so the decision still makes sense in three months."}
         </p>
         <div className="mt-3 space-y-1.5">
           {presets.map((p) => (
@@ -603,10 +709,10 @@ function ReasonDialog({
             onClick={() => void onConfirm(note.trim())}
             disabled={!note.trim()}
             className={`flex-1 rounded-lg py-2 text-[13px] font-semibold text-white disabled:opacity-40 ${
-              holding ? "bg-gold" : "bg-clay"
+              approving ? "bg-spruce" : holding ? "bg-gold" : "bg-clay"
             }`}
           >
-            {holding ? "Hold" : "Reject"}
+            {approving ? "Approve" : holding ? "Hold" : "Reject"}
           </button>
         </div>
       </div>

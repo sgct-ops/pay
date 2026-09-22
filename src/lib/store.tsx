@@ -322,7 +322,12 @@ interface QueueValue {
 const QueueContext = createContext<QueueValue | null>(null);
 const QUEUE_KEY = "ct.queue.v1";
 
-export function orderToQueueItem(order: StoredOrder): QueueItem {
+/**
+ * `tag` is the payout tag from desk settings. It is an argument rather than a
+ * lookup so this stays a plain function — and so a queue built under one tag
+ * cannot be silently re-labelled by a settings change mid-run.
+ */
+export function orderToQueueItem(order: StoredOrder, tag?: string): QueueItem {
   const amount = payAmount(order);
   return {
     orderKey: order.orderKey,
@@ -330,7 +335,7 @@ export function orderToQueueItem(order: StoredOrder): QueueItem {
     vpa: payUpi(order),
     name: order.customerName,
     amount: amount ? amount.toFixed(2) : "",
-    note: noteFor(order.orderNumber),
+    note: noteFor(order.orderNumber, tag),
     pieces: order.pieces,
   };
 }

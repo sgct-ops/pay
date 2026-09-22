@@ -5,6 +5,7 @@ import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useState, type ReactNode } from "react";
 import { useAuth } from "@/lib/auth-context";
 import { OrdersProvider, PayQueueProvider, useOrders } from "@/lib/store";
+import { SettingsProvider, useSettings } from "@/lib/settings-context";
 import { ALLOWED_DOMAIN } from "@/lib/firebase";
 import { ASSIGNABLE_ROLES, ROLE_LABELS, homeFor, type Role } from "@/lib/roles";
 import { relativeTime } from "@/lib/format";
@@ -32,6 +33,16 @@ function tabsFor(role: Role): Tab[] {
   return [];
 }
 
+/**
+ * Admin is deliberately not in tabsFor.
+ *
+ * The tab bar is the statement of what a role's job is, and nobody's job is
+ * "administer the desk" — it is a thing you go and do occasionally. It sits in
+ * the avatar menu, where it is reachable on a phone, and gets a quiet link on
+ * the wide nav so an admin at a laptop is one click away.
+ */
+const ADMIN_TAB: Tab = { href: "/admin", label: "Admin", glyph: "⚙" };
+
 export function AppShell({ children }: { children: ReactNode }) {
   const { user, loading, role } = useAuth();
 
@@ -40,22 +51,24 @@ export function AppShell({ children }: { children: ReactNode }) {
   if (role === "none") return <NoRole />;
 
   return (
-    <OrdersProvider>
-      <PayQueueProvider>
+    <SettingsProvider>
+      <OrdersProvider>
+        <PayQueueProvider>
         {/* A fixed-height app shell rather than a scrolling page: the header and
             the tab bar stay put, and a screen that says it fits one viewport
             actually does. */}
-        <div className="flex h-dvh flex-col overflow-hidden">
-          <Header />
-          <main className="min-h-0 flex-1 overflow-y-auto">
-            <div className="mx-auto h-full w-full max-w-[1400px] px-4 py-4 sm:px-6">
-              {children}
-            </div>
-          </main>
-          <MobileNav />
-        </div>
-      </PayQueueProvider>
-    </OrdersProvider>
+          <div className="flex h-dvh flex-col overflow-hidden">
+            <Header />
+            <main className="min-h-0 flex-1 overflow-y-auto">
+              <div className="mx-auto h-full w-full max-w-[1400px] px-4 py-4 sm:px-6">
+                {children}
+              </div>
+            </main>
+            <MobileNav />
+          </div>
+        </PayQueueProvider>
+      </OrdersProvider>
+    </SettingsProvider>
   );
 }
 
@@ -88,7 +101,7 @@ function Header() {
         </span>
 
         <nav className="ml-3 hidden items-center gap-1 lg:flex">
-          {tabsFor(role).map((t) => {
+          {[...tabsFor(role), ...(realRole === "admin" ? [ADMIN_TAB] : [])].map((t) => {
             const active = pathname.startsWith(t.href);
             return (
               <Link
@@ -151,11 +164,11 @@ function Header() {
                       ),
                     )}
                     <Link
-                      href="/people"
+                      href="/admin"
                       onClick={() => setMenu(false)}
                       className="mt-1 block border-t border-line-soft px-2.5 py-2 text-[12.5px] text-ink-2 hover:text-ink"
                     >
-                      People &amp; roles
+                      Admin &mdash; people &amp; settings
                     </Link>
                   </>
                 )}
@@ -179,10 +192,13 @@ function Header() {
 
 export function SyncButton() {
   const { refresh, refreshing, lastSyncedAt, orders } = useOrders();
+  const { settings } = useSettings();
   const now = useNow();
 
-  // Six hours without a sync and the button starts asking to be pressed.
-  const stale = lastSyncedAt > 0 && now - lastSyncedAt > 6 * 3600_000;
+  // Long enough without a sync and the button starts asking to be pressed.
+  // How long is an admin's call — a desk that uploads weekly wants a different
+  // answer from one that uploads daily.
+  const stale = lastSyncedAt > 0 && now - lastSyncedAt > settings.syncStaleHours * 3600_000;
 
   return (
     <button
@@ -265,7 +281,7 @@ function NoRole() {
         <h1 className="display text-[18px] font-semibold text-ink">No role yet</h1>
         <p className="mt-2 text-[13.5px] leading-relaxed text-ink-2">
           <span className="font-medium text-ink">{user?.email}</span> is signed in but has not been
-          given a role. Ask an admin to add you as operations or accounts on the People screen.
+          given a role. Ask an admin to add you as operations or accounts on the admin panel.
         </p>
         <button
           onClick={() => void signOutNow()}

@@ -1,8 +1,10 @@
-import type { Metadata } from "next";
-import { People } from "@/components/People";
+import { redirect } from "next/navigation";
 
-export const metadata: Metadata = { title: "People" };
-
+/**
+ * People & roles moved into the admin panel. Kept as a redirect because the
+ * old path is in the avatar menu of anyone with a tab open, and in at least
+ * one README.
+ */
 export default function PeoplePage() {
-  return <People />;
+  redirect("/admin?tab=people");
 }

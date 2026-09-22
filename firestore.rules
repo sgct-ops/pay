@@ -53,6 +53,18 @@ service cloud.firestore {
     function isOps()      { return signedIn() && (role() == 'ops' || role() == 'admin'); }
     function isAccounts() { return signedIn() && (role() == 'accounts' || role() == 'admin'); }
 
+    /* ------------------------------------------------------- settings --- */
+
+    // Desk settings an admin sets on the admin panel. Missing document means
+    // "no configuration yet", which resolves to the same defaults the app
+    // ships with — every guardrail below is off until somebody turns it on.
+    function settings() {
+      return exists(/databases/$(database)/documents/settings/app)
+        ? get(/databases/$(database)/documents/settings/app).data
+        : {};
+    }
+
+
     /* --------------------------------------------------------- orders --- */
 
     // Fields only accounts may move. Everything about whether money left.
@@ -71,20 +83,66 @@ service cloud.firestore {
       return request.resource.data.diff(resource.data).affectedKeys();
     }
 
+    // What would actually be paid: the correction operations made, or failing
+    // that the figure the export carried. Mirrors payAmount() in
+    // src/lib/order-view.ts — if one changes, so must the other.
+    function payable(d) {
+      return d.get('amountOverride', null) == null ? d.get('total', 0) : d.amountOverride;
+    }
+
+    // Is this write the moment an order becomes approved? Guardrails apply
+    // here and nowhere else: a re-upload that refreshes an already-approved
+    // order must not be refused because a ceiling was lowered afterwards.
+    function approvingNow() {
+      return request.resource.data.get('approval', 'pending') == 'approved'
+        && resource.data.get('approval', 'pending') != 'approved';
+    }
+
+    // The guardrails from the admin panel, enforced here rather than in the
+    // React code — so a session that skipped the UI is refused too. Each one
+    // is explained to the user by blockingReason() in order-view.ts; if you
+    // change a case here, change it there, or the button will lie.
+    //
+    // settings() is passed in rather than called three times: every exists()
+    // and get() counts against the per-request document-access limit, and
+    // this whole function is only reached when an order is being approved.
+    function withinGuardrails() {
+      return guardsPass(settings(), request.resource.data);
+    }
+
+    function guardsPass(s, d) {
+      return (s.get('maxRefundAmount', 0) <= 0
+              || payable(d) <= s.get('maxRefundAmount', 0))
+        && (s.get('blockCancelledShipment', false) == false
+              || d.get('shipRank', 0) < 4)
+        && (s.get('approvalNoteAbove', 0) <= 0
+              || payable(d) <= s.get('approvalNoteAbove', 0)
+              || (d.get('approvalNote', '') is string
+                  && d.get('approvalNote', '').size() > 0));
+    }
+
     match /orders/{orderKey} {
       allow read: if signedIn();
 
       // Orders are only ever created by an upload, which is the operations job.
-      allow create: if isOps();
+      // A file may not arrive pre-approved or pre-paid, whatever it contains.
+      allow create: if isOps()
+        && request.resource.data.get('approval', 'pending') == 'pending'
+        && request.resource.data.get('paid', false) == false;
 
       // Operations: may re-import, decide and correct — but may not touch a
-      // single field that says money moved.
-      allow update: if isOps() && !touched().hasAny(moneyKeys());
+      // single field that says money moved, and may not approve past the
+      // guardrails an admin set.
+      allow update: if isOps()
+        && !touched().hasAny(moneyKeys())
+        && (!approvingNow() || withinGuardrails());
 
       // Accounts: may only record the payment, only on something operations has
-      // already approved, and may not quietly change the amount on the way past.
+      // already approved, and may not quietly change the amount on the way past
+      // — nor touch any part of the decision itself.
       allow update: if isAccounts()
         && touched().hasOnly(moneyKeys().union(['payFailedReason', 'updatedAt'].toSet()))
+        && !touched().hasAny(decisionKeys())
         && resource.data.approval == 'approved'
         && request.resource.data.amountOverride == resource.data.amountOverride
         && request.resource.data.upiOverride == resource.data.upiOverride
@@ -111,6 +169,18 @@ service cloud.firestore {
       allow read: if signedIn();
       allow create: if signedIn() && request.resource.data.byEmail == email();
       allow update, delete: if false;
+    }
+
+    /* ------------------------------------------------------- settings --- */
+
+    // Everyone signed in reads the settings, because the screens have to
+    // explain the same rules this file enforces. Only an admin writes them.
+    match /settings/{docId} {
+      allow read: if signedIn();
+      allow create, update: if isAdmin();
+      // Deleting the document would silently switch every guardrail off.
+      // Setting a value back to 0 is how you turn one off, visibly.
+      allow delete: if false;
     }
 
     /* ---------------------------------------------------------- roles --- */

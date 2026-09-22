@@ -8,6 +8,7 @@ import type { StoredOrder } from "@/lib/sheet/types";
 import { isCorrected, payAmount, payUpi } from "@/lib/order-view";
 import { money, shortDate } from "@/lib/format";
 import { InstallHint } from "@/components/InstallHint";
+import { useSettings } from "@/lib/settings-context";
 
 /**
  * The accounts desk.
@@ -20,6 +21,7 @@ import { InstallHint } from "@/components/InstallHint";
 export function Refunds() {
   const { orders, ready, error } = useOrders();
   const { push } = usePayQueue();
+  const { settings } = useSettings();
   const router = useRouter();
 
   const [tab, setTab] = useState<"due" | "paid">("due");
@@ -59,7 +61,10 @@ export function Refunds() {
   if (!ready) return <Skeleton />;
 
   const send = (list: StoredOrder[]) => {
-    push(list.map(orderToQueueItem), { replace: true });
+    push(
+      list.map((o) => orderToQueueItem(o, settings.noteTag)),
+      { replace: true },
+    );
     router.push("/pay");
   };
 

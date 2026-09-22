@@ -5,10 +5,12 @@ import { useOrders, usePayQueue, type QueueItem } from "@/lib/store";
 import { useAuth } from "@/lib/auth-context";
 import { QrCode } from "@/components/QrCode";
 import { InstallHint } from "@/components/InstallHint";
-import { isUpiHandle, noteFor, noteProblem, upiLink, NOTE_TAG } from "@/lib/upi";
+import { isUpiHandle, noteFor, noteProblem, upiLink } from "@/lib/upi";
+import { useSettings } from "@/lib/settings-context";
 import { money } from "@/lib/format";
 import {
   UPI_APPS,
+  appById,
   linkForApp,
   readPreferredApp,
   writePreferredApp,
@@ -20,6 +22,7 @@ export function PayDesk() {
   const { queue, index, current, setIndex, step, push, update, remove, clear } = usePayQueue();
   const { byKey, setPaid, failPayment } = useOrders();
   const { can, role } = useAuth();
+  const { settings } = useSettings();
 
   // Two canvases exist — one per layout — and only one is ever on screen.
   const deskCanvas = useRef<HTMLCanvasElement>(null);
@@ -28,7 +31,12 @@ export function PayDesk() {
   const [copiedAt, setCopiedAt] = useState(-1);
   // Which UPI app the phone opens. Remembered, because paying twenty refunds
   // through the same app should not mean twenty trips through a chooser.
-  const [upiApp, setUpiApp] = useState<UpiApp>(readPreferredApp);
+  const [upiApp, setUpiApp] = useState<UpiApp>(() => {
+    // A payer who has chosen for themselves keeps that choice; the admin
+    // setting is only the starting point for a phone that has not.
+    const chosen = readPreferredApp();
+    return chosen.id === "any" ? appById(settings.defaultUpiApp) : chosen;
+  });
   const [pickingApp, setPickingApp] = useState(false);
   const [showQueue, setShowQueue] = useState(false);
   const [failing, setFailing] = useState(false);
@@ -44,7 +52,9 @@ export function PayDesk() {
    */
   const editable = Boolean(current?.adhoc);
 
-  const problem = current ? noteProblem(current.note) : null;
+  const problem = current
+    ? noteProblem(current.note, settings.noteTag, settings.noteMaxLength)
+    : null;
   const vpaOk = current ? isUpiHandle(current.vpa) : false;
   const link = current && vpaOk && !problem ? upiLink(current) : "";
 
@@ -247,7 +257,9 @@ export function PayDesk() {
       {/* --------------------------------------------------------- desktop -- */}
       <div className="hidden gap-4 lg:grid xl:grid-cols-[320px_minmax(0,1fr)]">
         <aside className="space-y-4">
-          {can.manageRoles && <AddPayee onAdd={(item) => push([item])} />}
+          {can.manageRoles && settings.allowAdhocPayments && (
+            <AddPayee onAdd={(item) => push([item])} tag={settings.noteTag} />
+          )}
           <Queue
             queue={queue}
             index={index}
@@ -312,7 +324,7 @@ export function PayDesk() {
                       </div>
                     )}
                   </Labelled>
-                  <Labelled label={`Note — must contain ${NOTE_TAG}`}>
+                  <Labelled label={`Note — must contain ${settings.noteTag}`}>
                     {editable ? (
                       <input
                         value={current.note}
@@ -733,7 +745,7 @@ function Carousel({
   );
 }
 
-function AddPayee({ onAdd }: { onAdd: (item: QueueItem) => void }) {
+function AddPayee({ onAdd, tag }: { onAdd: (item: QueueItem) => void; tag: string }) {
   const [vpa, setVpa] = useState("");
   const [name, setName] = useState("");
   const [amount, setAmount] = useState("");
@@ -747,7 +759,7 @@ function AddPayee({ onAdd }: { onAdd: (item: QueueItem) => void }) {
       vpa: handle,
       name: name.trim(),
       amount: amount.trim(),
-      note: noteFor(),
+      note: noteFor(undefined, tag),
       pieces: 0,
       adhoc: true,
     });

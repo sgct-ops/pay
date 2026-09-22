@@ -1,5 +1,16 @@
-/** The note every CarbonTree payout must carry, so refunds are recognisable on a statement. */
+/**
+ * The tag every payout note must carry, so refunds are recognisable on a bank
+ * statement months later.
+ *
+ * This is the fallback. The live value comes from desk settings, because the
+ * tag is a decision about how the company reads its own statement, not a fact
+ * about the code — and the helpers below take it as an argument so nothing
+ * silently pays out under the wrong one when it is changed.
+ */
 export const NOTE_TAG = "CARBONTREE";
+
+/** The fallback note length. Some UPI apps truncate beyond this. */
+export const NOTE_MAX_LENGTH = 50;
 
 export interface UpiLinkInput {
   vpa: string;
@@ -8,16 +19,22 @@ export interface UpiLinkInput {
   note: string;
 }
 
-export function noteFor(orderNumber?: string): string {
-  return orderNumber ? `${NOTE_TAG} #${String(orderNumber).replace(/^#/, "")}` : NOTE_TAG;
+export function noteFor(orderNumber?: string, tag: string = NOTE_TAG): string {
+  return orderNumber ? `${tag} #${String(orderNumber).replace(/^#/, "")}` : tag;
 }
 
-/** The note is mandatory and must contain CARBONTREE. Returns null when it is fine. */
-export function noteProblem(note: string): string | null {
+/** The note is mandatory and must carry the tag. Returns null when it is fine. */
+export function noteProblem(
+  note: string,
+  tag: string = NOTE_TAG,
+  maxLength: number = NOTE_MAX_LENGTH,
+): string | null {
   const v = (note || "").trim();
   if (!v) return "A payout note is required.";
-  if (!v.toUpperCase().includes(NOTE_TAG)) return `The note must contain ${NOTE_TAG}.`;
-  if (v.length > 50) return "UPI notes longer than 50 characters get truncated by some apps.";
+  if (!v.toUpperCase().includes(tag.toUpperCase())) return `The note must contain ${tag}.`;
+  if (v.length > maxLength) {
+    return `UPI notes longer than ${maxLength} characters get truncated by some apps.`;
+  }
   return null;
 }
 

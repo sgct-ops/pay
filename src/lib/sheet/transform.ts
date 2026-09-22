@@ -1,11 +1,12 @@
 import type {
+  ExclusionRule,
   OrderLine,
   PayoutOrder,
   RawRow,
   TransformResult,
   TransformSummary,
 } from "./types";
-import { DEFAULT_STAGES } from "./types";
+import { DEFAULT_EXCLUSIONS, DEFAULT_STAGES } from "./types";
 
 /**
  * The Return Prime transform, stated once so the app and any script agree.
@@ -43,15 +44,7 @@ function isBankHandle(local: string, domain: string): boolean {
   return local.length >= 2 && !domain.includes(".");
 }
 
-/** Notes that mean "this line is not a payout", whatever the amount says. */
-const NONPAY_PATTERNS: Array<[RegExp, string]> = [
-  [/adjusted in another product/i, "adjusted against another product"],
-  [/\bstore credit\b/i, "settled as store credit"],
-  [/\bmarketing\b/i, "marketing, not a refund"],
-  [/no refund needed/i, "marked no refund needed"],
-  [/exchang/i, "exchanged, not refunded"],
-  [/alter and send/i, "alteration, not a refund"],
-];
+
 
 const MONTHS: Record<string, number> = {
   jan: 0, feb: 1, mar: 2, apr: 3, may: 4, jun: 5,
@@ -78,11 +71,39 @@ export function cleanUpi(value: string): string {
   return findUpis(value)[0] ?? "";
 }
 
-/** Why this line is not payable, or null when it is. */
-export function nonPayableReason(notes: string, amount: number): string | null {
+/**
+ * Does this note trip this rule?
+ *
+ * The phrase is escaped before it becomes a pattern, so an admin typing "c/o"
+ * or "50% off" into the exclusions list gets a literal match rather than a
+ * regex that quietly excludes everything — or throws.
+ */
+export function matchesExclusion(notes: string, rule: ExclusionRule): boolean {
+  const phrase = rule.phrase.trim();
+  if (!phrase) return false;
+  const escaped = phrase.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const pattern = rule.wholeWord ? `\\b${escaped}\\b` : escaped;
+  try {
+    return new RegExp(pattern, "i").test(notes || "");
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Why this line is not payable, or null when it is.
+ *
+ * `rules` comes from desk settings at run time; the default is the list the
+ * transform has always used, which is what the fixture test pins.
+ */
+export function nonPayableReason(
+  notes: string,
+  amount: number,
+  rules: readonly ExclusionRule[] = DEFAULT_EXCLUSIONS,
+): string | null {
   if (!(amount > 0)) return "no eligible amount";
-  for (const [re, reason] of NONPAY_PATTERNS) {
-    if (re.test(notes || "")) return reason;
+  for (const rule of rules) {
+    if (rule.enabled && matchesExclusion(notes, rule)) return rule.reason;
   }
   return null;
 }
@@ -152,12 +173,18 @@ export function weekLabel(ts: number): string {
 export interface TransformOptions {
   /** Return stages to keep. Defaults to received + approved. */
   stages?: readonly string[];
+  /**
+   * Line notes that mean "not a payout". Defaults to the list in types.ts,
+   * which is what an unconfigured project and the fixture test both use.
+   */
+  exclusions?: readonly ExclusionRule[];
 }
 
 export function transform(rows: RawRow[], options: TransformOptions = {}): TransformResult {
   const stages = (options.stages?.length ? options.stages : DEFAULT_STAGES).map((s) =>
     s.toLowerCase(),
   );
+  const exclusions = options.exclusions ?? DEFAULT_EXCLUSIONS;
 
   const present = new Set<string>();
   rows.slice(0, 5).forEach((r) => Object.keys(r).forEach((k) => present.add(k)));
@@ -179,7 +206,7 @@ export function transform(rows: RawRow[], options: TransformOptions = {}): Trans
 
     const notes = row.refund_additional_details || "";
     const amount = toAmount(row.eligible_refund_amount);
-    const excludedFor = nonPayableReason(notes, amount);
+    const excludedFor = nonPayableReason(notes, amount, exclusions);
     const serial = row.serial_number || row.line_item_id || String(index + 1);
 
     kept.push({

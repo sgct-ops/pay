@@ -6,6 +6,7 @@ import type { AuditEvent, Batch, EventKind } from "@/lib/sheet/types";
 import { dateTime, money, shortDate } from "@/lib/format";
 import { useOrders } from "@/lib/store";
 import { ROLE_LABELS, type Role } from "@/lib/roles";
+import { useSettings } from "@/lib/settings-context";
 
 const KIND_LABELS: Record<EventKind, string> = {
   upload: "uploaded",
@@ -18,6 +19,7 @@ const KIND_LABELS: Record<EventKind, string> = {
   unpay: "un-paid",
   payfail: "transfer failed",
   role: "role change",
+  settings: "settings",
 };
 
 const KIND_TONES: Record<EventKind, string> = {
@@ -31,6 +33,7 @@ const KIND_TONES: Record<EventKind, string> = {
   unpay: "bg-clay-wash text-clay",
   payfail: "bg-clay-wash text-clay",
   role: "bg-slate-wash text-slate",
+  settings: "bg-slate-wash text-slate",
 };
 
 /**
@@ -40,6 +43,7 @@ const KIND_TONES: Record<EventKind, string> = {
  */
 export function Activity() {
   const { refresh, refreshing } = useOrders();
+  const { settings } = useSettings();
   const [events, setEvents] = useState<AuditEvent[] | null>(null);
   const [batches, setBatches] = useState<Batch[] | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -48,7 +52,7 @@ export function Activity() {
 
   const fetchAll = useCallback(async () => {
     try {
-      const [e, b] = await Promise.all([listEvents(200), listBatches(20)]);
+      const [e, b] = await Promise.all([listEvents(settings.auditPageSize), listBatches(20)]);
       setEvents(e);
       setBatches(b);
       setError(null);
@@ -57,7 +61,7 @@ export function Activity() {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [settings.auditPageSize]);
 
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect

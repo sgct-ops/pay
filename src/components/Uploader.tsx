@@ -5,12 +5,13 @@ import { useRouter } from "next/navigation";
 import { ref as storageRef, uploadBytes } from "firebase/storage";
 import { parseDelimited, readSheetFile } from "@/lib/sheet/parse";
 import { transform } from "@/lib/sheet/transform";
-import { ALL_STAGES, DEFAULT_STAGES } from "@/lib/sheet/types";
+import { ALL_STAGES } from "@/lib/sheet/types";
 import type { StoredOrder, TransformResult } from "@/lib/sheet/types";
 import { saveBatch } from "@/lib/data/orders";
 import { getFirebaseStorage } from "@/lib/firebase";
 import { useAuth } from "@/lib/auth-context";
 import { useOrders } from "@/lib/store";
+import { useSettings } from "@/lib/settings-context";
 import { money, shortDate } from "@/lib/format";
 
 type Phase = "idle" | "reading" | "review" | "saving" | "done";
@@ -19,10 +20,13 @@ export function Uploader() {
   const router = useRouter();
   const { user, role, can } = useAuth();
   const { orders, merge, refresh } = useOrders();
+  const { settings } = useSettings();
   const inputRef = useRef<HTMLInputElement>(null);
 
   const [phase, setPhase] = useState<Phase>("idle");
-  const [stages, setStages] = useState<string[]>([...DEFAULT_STAGES]);
+  // Seeded from desk settings, then owned by this screen — an admin sets the
+  // usual answer, whoever is uploading can still override it for one file.
+  const [stages, setStages] = useState<string[]>(() => [...settings.defaultStages]);
   const [file, setFile] = useState<File | null>(null);
   const [pasted, setPasted] = useState("");
   const [result, setResult] = useState<TransformResult | null>(null);
@@ -42,7 +46,7 @@ export function Uploader() {
           setPhase("idle");
           return;
         }
-        const out = transform(rows, { stages: nextStages });
+        const out = transform(rows, { stages: nextStages, exclusions: settings.exclusions });
         if (out.missingColumns.length) {
           setError(
             `This does not look like a Return Prime export — it is missing ${out.missingColumns.join(
@@ -59,7 +63,7 @@ export function Uploader() {
         setPhase("idle");
       }
     },
-    [stages],
+    [stages, settings.exclusions],
   );
 
   const pick = (f: File | null) => {
@@ -172,6 +176,16 @@ export function Uploader() {
         <div className="mb-3 flex flex-wrap items-center gap-2">
           <span className="text-[12px] uppercase tracking-[0.06em] text-ink-3">
             Return stages to keep
+          </span>
+          <span
+            className="ml-auto text-[11.5px] text-ink-3"
+            title={settings.exclusions
+              .filter((e) => e.enabled)
+              .map((e) => `"${e.phrase}" → ${e.reason}`)
+              .join("\n")}
+          >
+            {settings.exclusions.filter((e) => e.enabled).length} exclusion rule
+            {settings.exclusions.filter((e) => e.enabled).length === 1 ? "" : "s"} in force
           </span>
           {ALL_STAGES.map((s) => (
             <label
