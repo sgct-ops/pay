@@ -78,8 +78,9 @@ body {
   border-right: 1px dashed var(--color-line);
 }
 
-/* Stacked, the perforation sits above the stub rather than beside it. */
-@media (max-width: 1023px) {
+/* Stacked, the perforation sits above the stub rather than beside it. The
+   breakpoint matches the desk's own: it splits in two at xl, not at lg. */
+@media (max-width: 1279px) {
   .perf {
     border-right: 0;
     border-top: 1px dashed var(--color-line);

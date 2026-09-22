@@ -255,7 +255,12 @@ export function PayDesk() {
       </div>
 
       {/* --------------------------------------------------------- desktop -- */}
-      <div className="hidden gap-4 lg:grid xl:grid-cols-[320px_minmax(0,1fr)]">
+      {/* Between 1024 and 1279 this had `lg:grid` with no column definition,
+          so the queue and the desk stacked into one column while the desk
+          inside them had already split in two — a 256px band of common laptop
+          widths where the layout came apart. Both columns are now defined at
+          every width the desktop layout is on at. */}
+      <div className="hidden gap-4 lg:grid lg:grid-cols-[280px_minmax(0,1fr)] xl:grid-cols-[320px_minmax(0,1fr)]">
         <aside className="space-y-4">
           {can.manageRoles && settings.allowAdhocPayments && (
             <AddPayee onAdd={(item) => push([item])} tag={settings.noteTag} />
@@ -271,11 +276,17 @@ export function PayDesk() {
           <InstallHint compact />
         </aside>
 
-        <section className="rounded-card border border-line bg-card">
+        {/* overflow-hidden so nothing can ever spill past the rounded border. */}
+        <section className="overflow-hidden rounded-card border border-line bg-card">
           {!current ? (
             <EmptyDesk role={role} />
           ) : (
-            <div className="grid lg:grid-cols-[286px_minmax(0,1fr)]">
+            /* The QR sat beside the details from 1024px up, in a fixed 286px
+               track, while the queue column was also taking 280-320px. At the
+               bottom of that range the details column had nothing left and the
+               QR pushed out of the card. It now goes side-by-side only at xl,
+               where there is actually room for both. */
+            <div className="grid xl:grid-cols-[286px_minmax(0,1fr)]">
               <div className="perf flex flex-col items-center justify-center gap-3 px-5 py-6">
                 <QrCode value={link} disabled={!link} canvasRef={deskCanvas} size={224} />
                 <p className="text-center text-[11.5px] leading-relaxed text-ink-3">

@@ -52,9 +52,12 @@ export function QrCode({
   // Fluid mode lets the canvas keep its own square aspect and simply clamps it
   // with max-width/max-height. Percentage heights on a replaced element inside
   // an auto-sized track resolve unpredictably and crop the code.
+  // max-w-full on both shell and canvas in fixed mode too: the inline width is
+  // a preferred size, not a licence to push out of a narrow column. Without it
+  // a fixed 242px box in a tighter track simply overflows its container.
   const shell = fluid
     ? "flex aspect-square h-full max-w-full items-center justify-center rounded-xl border border-line bg-white p-2"
-    : "grid place-items-center rounded-lg border border-line bg-white";
+    : "grid max-w-full place-items-center rounded-lg border border-line bg-white";
 
   return (
     <div className={shell} style={fluid ? undefined : { width: size + 18, height: size + 18 }}>
@@ -69,7 +72,9 @@ export function QrCode({
           ref={ref}
           width={RESOLUTION}
           height={RESOLUTION}
-          className={fluid ? "h-full max-h-full w-auto max-w-full object-contain" : ""}
+          className={
+            fluid ? "h-full max-h-full w-auto max-w-full object-contain" : "h-auto max-w-full"
+          }
           style={fluid ? undefined : { width: size, height: size }}
         />
       )}

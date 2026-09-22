@@ -23,6 +23,44 @@ import type { AppSettings } from "@/lib/settings";
 
 type Filter = Approval | "all";
 
+/** The date ranges worth one tap. "custom" is whatever the two inputs say. */
+type Preset = "all" | "7" | "30" | "month" | "custom";
+
+const PRESETS: Array<[Preset, string]> = [
+  ["all", "All time"],
+  ["7", "7 days"],
+  ["30", "30 days"],
+  ["month", "This month"],
+  ["custom", "Custom"],
+];
+
+/** yyyy-mm-dd in UTC, matching how the export's dates are parsed and compared. */
+function isoDay(ts: number): string {
+  return new Date(ts).toISOString().slice(0, 10);
+}
+
+/**
+ * The two dates a preset stands for, both inclusive.
+ *
+ * Module scope on purpose: it reads the clock, which is not something to do
+ * while rendering. It is only ever called from a click.
+ */
+function presetRange(preset: Exclude<Preset, "custom">): { from: string; to: string } {
+  if (preset === "all") return { from: "", to: "" };
+
+  const today = Date.now();
+  if (preset === "month") {
+    const now = new Date(today);
+    return {
+      from: isoDay(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1)),
+      to: isoDay(today),
+    };
+  }
+  // Inclusive of today, so "7 days" is a week of work, not six days and today.
+  const days = preset === "7" ? 7 : 30;
+  return { from: isoDay(today - (days - 1) * 86_400_000), to: isoDay(today) };
+}
+
 /**
  * The operations desk: verify what the export says, fix what it got wrong, and
  * decide what accounts is allowed to pay. There is no payment control anywhere
@@ -34,9 +72,11 @@ export function Ledger() {
 
   const [search, setSearch] = useState("");
   const [filter, setFilter] = useState<Filter>("pending");
-  // Both ends inclusive, as yyyy-mm-dd from a date input. Empty means open.
+  // Both ends inclusive, as yyyy-mm-dd from a date input. Empty means open,
+  // which is what "All time" sets them back to.
   const [from, setFrom] = useState("");
   const [to, setTo] = useState("");
+  const [preset, setPreset] = useState<Preset>("all");
   // A paid order is finished business, so the desk opens on what still needs
   // doing. Unticking brings them back for anyone checking an old payment.
   const [hidePaid, setHidePaid] = useState(true);
@@ -101,6 +141,14 @@ export function Ledger() {
       );
     });
   }, [orders, search, filter, from, to, hidePaid, showNothingToPay]);
+
+  const applyPreset = (next: Preset) => {
+    setPreset(next);
+    if (next === "custom") return;
+    const range = presetRange(next);
+    setFrom(range.from);
+    setTo(range.to);
+  };
 
   const weeks = useMemo(() => groupByWeek(visible), [visible]);
   const picked = useMemo(() => visible.filter((o) => selected[o.orderKey]), [visible, selected]);
@@ -167,58 +215,85 @@ export function Ledger() {
         </div>
       </div>
 
-      <div className="flex flex-wrap items-center gap-x-4 gap-y-2 px-1 text-[12.5px] text-ink-2">
-        <div className="flex items-center gap-1.5">
-          <span className="text-ink-3">Approved between</span>
-          <input
-            type="date"
-            value={from}
-            max={to || undefined}
-            onChange={(e) => setFrom(e.target.value)}
-            className="rounded-lg border border-line bg-card px-2 py-1 text-[12.5px] focus:border-spruce focus:outline-none"
-          />
-          <span className="text-ink-3">and</span>
-          <input
-            type="date"
-            value={to}
-            min={from || undefined}
-            onChange={(e) => setTo(e.target.value)}
-            className="rounded-lg border border-line bg-card px-2 py-1 text-[12.5px] focus:border-spruce focus:outline-none"
-          />
-          {(from || to) && (
+      {/* Stacks on a phone and stays on one line from sm up. Two date inputs
+          plus their labels do not fit across a 360px screen, so the presets
+          carry the common cases and the inputs only appear when they are the
+          thing being used. */}
+      <div className="space-y-2 px-1">
+        <div className="flex flex-wrap items-center gap-1.5 text-[12.5px]">
+          <span className="mr-0.5 text-ink-3">Approved</span>
+          {PRESETS.map(([value, label]) => (
             <button
-              onClick={() => {
-                setFrom("");
-                setTo("");
-              }}
-              className="text-ink-3 underline-offset-2 hover:text-ink hover:underline"
+              key={value}
+              onClick={() => applyPreset(value)}
+              className={`rounded-full border px-2.5 py-1 font-medium transition ${
+                preset === value
+                  ? "border-spruce/30 bg-spruce-wash text-spruce"
+                  : "border-line bg-card text-ink-2 hover:text-ink"
+              }`}
             >
-              clear
+              {label}
             </button>
-          )}
+          ))}
         </div>
 
-        <label className="flex cursor-pointer items-center gap-1.5">
-          <input
-            type="checkbox"
-            checked={hidePaid}
-            onChange={(e) => setHidePaid(e.target.checked)}
-            className="h-3.5 w-3.5 accent-[#2f6b4f]"
-          />
-          Hide paid{counts.paid > 0 && ` (${counts.paid})`}
-        </label>
+        {(preset === "custom" || from || to) && (
+          <div className="grid grid-cols-2 gap-2 sm:flex sm:items-center sm:gap-2">
+            <label className="flex min-w-0 flex-col gap-1 sm:flex-row sm:items-center sm:gap-1.5">
+              <span className="text-[11px] uppercase tracking-[0.06em] text-ink-3">From</span>
+              <input
+                type="date"
+                value={from}
+                max={to || undefined}
+                onChange={(e) => {
+                  setFrom(e.target.value);
+                  setPreset("custom");
+                }}
+                className="w-full rounded-lg border border-line bg-card px-2 py-1.5 text-[12.5px] focus:border-spruce focus:outline-none sm:w-auto"
+              />
+            </label>
+            <label className="flex min-w-0 flex-col gap-1 sm:flex-row sm:items-center sm:gap-1.5">
+              <span className="text-[11px] uppercase tracking-[0.06em] text-ink-3">To</span>
+              <input
+                type="date"
+                value={to}
+                min={from || undefined}
+                onChange={(e) => {
+                  setTo(e.target.value);
+                  setPreset("custom");
+                }}
+                className="w-full rounded-lg border border-line bg-card px-2 py-1.5 text-[12.5px] focus:border-spruce focus:outline-none sm:w-auto"
+              />
+            </label>
+          </div>
+        )}
 
-        {counts.nothingToPay > 0 && (
-          <label className="flex cursor-pointer items-center gap-1.5" title="Orders where every line was an alteration, an exchange, a store credit or an amount settled elsewhere. Uploads no longer create these.">
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-2 text-[12.5px] text-ink-2">
+          <label className="flex cursor-pointer items-center gap-1.5">
             <input
               type="checkbox"
-              checked={showNothingToPay}
-              onChange={(e) => setShowNothingToPay(e.target.checked)}
+              checked={hidePaid}
+              onChange={(e) => setHidePaid(e.target.checked)}
               className="h-3.5 w-3.5 accent-[#2f6b4f]"
             />
-            Show {counts.nothingToPay} with nothing to pay
+            Hide paid{counts.paid > 0 && ` (${counts.paid})`}
           </label>
-        )}
+
+          {counts.nothingToPay > 0 && (
+            <label
+              className="flex cursor-pointer items-center gap-1.5"
+              title="Orders where every line was an alteration, an exchange, a store credit or an amount settled elsewhere. Uploads no longer create these."
+            >
+              <input
+                type="checkbox"
+                checked={showNothingToPay}
+                onChange={(e) => setShowNothingToPay(e.target.checked)}
+                className="h-3.5 w-3.5 accent-[#2f6b4f]"
+              />
+              Show {counts.nothingToPay} with nothing to pay
+            </label>
+          )}
+        </div>
       </div>
 
       {error && (
