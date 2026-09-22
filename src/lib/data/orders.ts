@@ -244,6 +244,27 @@ function logInto(
   writer.set(doc(collection(getDb(), EVENTS)), event);
 }
 
+/**
+ * An order the export is carrying again with nothing new to say.
+ *
+ * Amount and handle are the figures a decision is made about; shipment state
+ * is the other thing that can block an approval. If none of the three moved,
+ * rewriting the document would cost a write and change nothing.
+ */
+function isUnchanged(existing: StoredOrder, incoming: PayoutOrder): boolean {
+  return (
+    existing.total === incoming.total &&
+    existing.upi === incoming.upi &&
+    existing.shipRank === incoming.shipRank
+  );
+}
+
+export interface SaveBatchResult {
+  batch: Batch;
+  /** Orders skipped as unchanged duplicates, so the caller can leave them be. */
+  duplicateKeys: string[];
+}
+
 export interface SaveBatchInput {
   orders: PayoutOrder[];
   summary: TransformSummary;
@@ -267,8 +288,13 @@ export interface SaveBatchInput {
  * handle on an order operations had already approved, the approval is pulled
  * back to pending. An approval is a decision about a specific figure; change the
  * figure and the decision has to be made again.
+ *
+ * An order that comes again with nothing moved at all is not rewritten. A
+ * monthly export carries last month's rows too, and rewriting them would cost
+ * a write each and produce an identical document. Those are counted as
+ * duplicates and left exactly as they are, decisions and all.
  */
-export async function saveBatch(input: SaveBatchInput): Promise<Batch> {
+export async function saveBatch(input: SaveBatchInput): Promise<SaveBatchResult> {
   const db = getDb();
   const batchId = `${new Date().toISOString().slice(0, 10)}-${Math.random()
     .toString(36)
@@ -278,6 +304,7 @@ export async function saveBatch(input: SaveBatchInput): Promise<Batch> {
   let ordersNew = 0;
   let ordersUpdated = 0;
   let ordersReopened = 0;
+  const duplicateKeys: string[] = [];
 
   const chunks: PayoutOrder[][] = [];
   for (let i = 0; i < input.orders.length; i += 200) {
@@ -286,8 +313,19 @@ export async function saveBatch(input: SaveBatchInput): Promise<Batch> {
 
   for (const chunk of chunks) {
     const writer = writeBatch(db);
+    let writes = 0;
     for (const order of chunk) {
       const existing = input.known.get(order.orderKey);
+
+      // Already in the ledger, and the export has not moved anything that
+      // matters. Leave the document alone: a rewrite here would cost a write
+      // to produce a byte-identical result.
+      if (existing && isUnchanged(existing, order)) {
+        duplicateKeys.push(order.orderKey);
+        continue;
+      }
+
+      writes++;
       if (!existing) ordersNew++;
       else ordersUpdated++;
 
@@ -341,7 +379,9 @@ export async function saveBatch(input: SaveBatchInput): Promise<Batch> {
 
       writer.set(doc(db, ORDERS, order.orderKey), payload, { merge: true });
     }
-    await writer.commit();
+    // A chunk can be entirely duplicates, and an empty commit is a round trip
+    // that achieves nothing.
+    if (writes) await writer.commit();
   }
 
   const batch: Batch = {
@@ -354,6 +394,7 @@ export async function saveBatch(input: SaveBatchInput): Promise<Batch> {
     summary: input.summary,
     ordersNew,
     ordersUpdated,
+    ordersDuplicate: duplicateKeys.length,
   };
 
   const writer = writeBatch(db);
@@ -364,6 +405,8 @@ export async function saveBatch(input: SaveBatchInput): Promise<Batch> {
       kind: "upload",
       note: `${input.fileName} · ${ordersNew} new, ${ordersUpdated} refreshed${
         ordersReopened ? `, ${ordersReopened} re-opened` : ""
+      }${duplicateKeys.length ? `, ${duplicateKeys.length} already in the ledger` : ""}${
+        input.summary.ordersExcluded ? `, ${input.summary.ordersExcluded} not a refund` : ""
       }`,
       amount: input.summary.totalPayable,
     },
@@ -371,7 +414,7 @@ export async function saveBatch(input: SaveBatchInput): Promise<Batch> {
   );
   await writer.commit();
 
-  return batch;
+  return { batch, duplicateKeys };
 }
 
 /* ------------------------------------------------- operations' decisions --- */

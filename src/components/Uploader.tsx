@@ -30,7 +30,11 @@ export function Uploader() {
   const [pasted, setPasted] = useState("");
   const [result, setResult] = useState<TransformResult | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [saved, setSaved] = useState<{ created: number; updated: number } | null>(null);
+  const [saved, setSaved] = useState<{
+    created: number;
+    updated: number;
+    duplicate: number;
+  } | null>(null);
   const [archive, setArchive] = useState(true);
   const [archived, setArchived] = useState(false);
 
@@ -85,7 +89,7 @@ export function Uploader() {
     setError(null);
     try {
       const known = new Map(orders.map((o) => [o.orderKey, o]));
-      const batch = await saveBatch({
+      const { batch, duplicateKeys } = await saveBatch({
         orders: result.orders,
         summary: result.summary,
         stages,
@@ -117,8 +121,14 @@ export function Uploader() {
       setArchived(kept);
 
       const now = Date.now();
+      // Orders skipped as duplicates were not written, so they must not be
+      // touched locally either — merging them would add this batch id to a
+      // document that never recorded it and put the cache out of step.
+      const skipped = new Set(duplicateKeys);
       merge(
-        result.orders.map((o): StoredOrder => {
+        result.orders
+          .filter((o) => !skipped.has(o.orderKey))
+          .map((o): StoredOrder => {
           const existing = known.get(o.orderKey);
           // Mirror the server's rule locally: a changed amount or handle pulls
           // an approval back, everything else about the decision is preserved.
@@ -148,7 +158,11 @@ export function Uploader() {
         }),
       );
 
-      setSaved({ created: batch.ordersNew, updated: batch.ordersUpdated });
+      setSaved({
+        created: batch.ordersNew,
+        updated: batch.ordersUpdated,
+        duplicate: batch.ordersDuplicate,
+      });
       setPhase("done");
       void refresh();
     } catch (e) {
@@ -307,7 +321,7 @@ function Review({
 }: {
   result: TransformResult;
   phase: Phase;
-  saved: { created: number; updated: number } | null;
+  saved: { created: number; updated: number; duplicate: number } | null;
   archived: boolean;
   onSave: () => void;
   onOpenLedger: () => void;
@@ -336,6 +350,16 @@ function Review({
           </>
         )}
         . Approvals run {shortDate(s.rangeFrom)} to {shortDate(s.rangeTo)}.
+        {(s.ordersExcluded ?? 0) > 0 && (
+          <>
+            {" "}
+            <span className="text-ink-3">
+              {s.ordersExcluded} order{s.ordersExcluded === 1 ? " was" : "s were"} left out
+              entirely — every line on {s.ordersExcluded === 1 ? "it" : "them"} was an alteration,
+              an exchange, a store credit or an amount settled elsewhere.
+            </span>
+          </>
+        )}
       </p>
 
       <div className="overflow-hidden rounded-card border border-line bg-card">
@@ -365,7 +389,14 @@ function Review({
           <p className="text-[13px] text-spruce">
             Saved. <span className="font-semibold">{saved.created}</span> new order
             {saved.created === 1 ? "" : "s"}, <span className="font-semibold">{saved.updated}</span>{" "}
-            refreshed. Paid ticks were left untouched.
+            refreshed
+            {saved.duplicate > 0 && (
+              <>
+                , and <span className="font-semibold">{saved.duplicate}</span> already in the
+                ledger unchanged, so {saved.duplicate === 1 ? "it was" : "they were"} left alone
+              </>
+            )}
+            . Paid ticks were left untouched.
             {archived && " The file is kept on this device, under Admin → Data."}
           </p>
           <button

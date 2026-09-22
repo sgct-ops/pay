@@ -93,7 +93,7 @@ const byNumber = new Map(out.orders.map((o) => [o.orderNumber, o]));
 
 check("no missing columns", out.missingColumns, []);
 check("lines kept", out.summary.linesKept, 9);
-check("orders", out.summary.orders, 6);
+check("orders", out.summary.orders, 5);
 check("refunded order dropped", byNumber.has("42119"), false);
 check("wrong refund mode dropped", byNumber.has("42120"), false);
 check("unselected stage dropped", byNumber.has("42121"), false);
@@ -110,7 +110,10 @@ check("42122 email is not a UPI handle", byNumber.get("42122")!.upi, "");
 check("42123 cancelled shipment flagged", byNumber.get("42123")!.shipRank, 4);
 check("42124 handle clash", byNumber.get("42124")!.upiClash, true);
 check("42124 first handle wins", byNumber.get("42124")!.upi, "arjun@okhdfcbank");
-check("42125 exchange pays nothing", byNumber.get("42125")!.total, 0);
+// 42125 is nothing but an exchange, so there is no payout to decide about and
+// no reason for it to sit in the ledger looking like unfinished work.
+check("42125 never reaches the ledger", byNumber.has("42125"), false);
+check("42125 is counted as excluded", out.summary.ordersExcluded, 1);
 
 check("orders needing a payout", out.summary.ordersPayable, 5);
 check("with a usable handle", out.summary.ordersWithUpi, 4);

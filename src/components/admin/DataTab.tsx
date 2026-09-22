@@ -286,6 +286,9 @@ export function DataTab({
                 </span>
                 <span className="tnum text-ink-3">
                   {b.ordersNew} new · {b.ordersUpdated} refreshed
+                  {(b.ordersDuplicate ?? 0) > 0 && ` · ${b.ordersDuplicate} already had`}
+                  {(b.summary.ordersExcluded ?? 0) > 0 &&
+                    ` · ${b.summary.ordersExcluded} not a refund`}
                 </span>
                 <span className="hidden text-ink-3 sm:inline">{b.stages.join("+")}</span>
                 <span className="text-ink-3">{b.uploadedByEmail}</span>

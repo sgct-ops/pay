@@ -150,7 +150,17 @@ export interface PayoutOrder {
 export interface TransformSummary {
   rowsIn: number;
   linesKept: number;
+  /** Orders that reached the ledger: every one has at least one payable line. */
   orders: number;
+  /**
+   * Orders left out because every line was excluded — an alteration, an
+   * exchange, a store credit, an amount settled elsewhere. Counted so an
+   * upload still adds up, but never written to the ledger.
+   *
+   * Absent on batches saved before this was recorded, so read it as
+   * `ordersExcluded ?? 0`.
+   */
+  ordersExcluded: number;
   ordersPayable: number;
   ordersWithUpi: number;
   ordersMissingUpi: number;
@@ -256,5 +266,14 @@ export interface Batch {
   /** Orders this upload created vs. refreshed an existing document for. */
   ordersNew: number;
   ordersUpdated: number;
+  /**
+   * Orders the export carried again with nothing changed, so they were not
+   * rewritten. Exports overlap by design; this is how much of a file was
+   * already in the ledger.
+   *
+   * Absent on batches saved before this was recorded — read as
+   * `ordersDuplicate ?? 0`.
+   */
+  ordersDuplicate: number;
 }
 

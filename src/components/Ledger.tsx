@@ -34,6 +34,15 @@ export function Ledger() {
 
   const [search, setSearch] = useState("");
   const [filter, setFilter] = useState<Filter>("pending");
+  // Both ends inclusive, as yyyy-mm-dd from a date input. Empty means open.
+  const [from, setFrom] = useState("");
+  const [to, setTo] = useState("");
+  // A paid order is finished business, so the desk opens on what still needs
+  // doing. Unticking brings them back for anyone checking an old payment.
+  const [hidePaid, setHidePaid] = useState(true);
+  // Orders with nothing payable are no longer written by the transform, but
+  // ones uploaded before that change are still in Firestore.
+  const [showNothingToPay, setShowNothingToPay] = useState(false);
   const [selected, setSelected] = useState<Record<string, true>>({});
   const [open, setOpen] = useState<string | null>(null);
   const [asking, setAsking] = useState<{ order: StoredOrder | null; approval: Approval } | null>(
@@ -55,14 +64,34 @@ export function Ledger() {
       blocked: orders.filter(
         (o) => o.approval === "pending" && blockingReason(o, settings) !== null,
       ).length,
+      paid: orders.filter((o) => o.paid).length,
+      nothingToPay: orders.filter((o) => payAmount(o) <= 0).length,
     }),
     [orders, settings],
   );
 
   const visible = useMemo(() => {
     const q = search.trim().toLowerCase();
+    // Both ends inclusive: "to" covers the whole of that day. The dates in the
+    // export are UTC midnights, so the comparison is made in UTC too — a range
+    // must not shift by a day for someone reading it in a different timezone.
+    const fromTs = from ? Date.parse(`${from}T00:00:00Z`) : null;
+    const toTs = to ? Date.parse(`${to}T23:59:59.999Z`) : null;
+
     return orders.filter((o) => {
       if (filter !== "all" && o.approval !== filter) return false;
+      if (payAmount(o) <= 0 && !showNothingToPay) return false;
+      if (hidePaid && o.paid) return false;
+
+      if (fromTs !== null || toTs !== null) {
+        // The same date the week headings group by, so a range and a heading
+        // never disagree about which week an order belongs to.
+        const when = o.approvedAt ?? o.receivedAt;
+        if (when === null) return false;
+        if (fromTs !== null && when < fromTs) return false;
+        if (toTs !== null && when > toTs) return false;
+      }
+
       if (!q) return true;
       return (
         o.orderNumber.toLowerCase().includes(q) ||
@@ -71,7 +100,7 @@ export function Ledger() {
         payUpi(o).includes(q)
       );
     });
-  }, [orders, search, filter]);
+  }, [orders, search, filter, from, to, hidePaid, showNothingToPay]);
 
   const weeks = useMemo(() => groupByWeek(visible), [visible]);
   const picked = useMemo(() => visible.filter((o) => selected[o.orderKey]), [visible, selected]);
@@ -138,6 +167,60 @@ export function Ledger() {
         </div>
       </div>
 
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-2 px-1 text-[12.5px] text-ink-2">
+        <div className="flex items-center gap-1.5">
+          <span className="text-ink-3">Approved between</span>
+          <input
+            type="date"
+            value={from}
+            max={to || undefined}
+            onChange={(e) => setFrom(e.target.value)}
+            className="rounded-lg border border-line bg-card px-2 py-1 text-[12.5px] focus:border-spruce focus:outline-none"
+          />
+          <span className="text-ink-3">and</span>
+          <input
+            type="date"
+            value={to}
+            min={from || undefined}
+            onChange={(e) => setTo(e.target.value)}
+            className="rounded-lg border border-line bg-card px-2 py-1 text-[12.5px] focus:border-spruce focus:outline-none"
+          />
+          {(from || to) && (
+            <button
+              onClick={() => {
+                setFrom("");
+                setTo("");
+              }}
+              className="text-ink-3 underline-offset-2 hover:text-ink hover:underline"
+            >
+              clear
+            </button>
+          )}
+        </div>
+
+        <label className="flex cursor-pointer items-center gap-1.5">
+          <input
+            type="checkbox"
+            checked={hidePaid}
+            onChange={(e) => setHidePaid(e.target.checked)}
+            className="h-3.5 w-3.5 accent-[#2f6b4f]"
+          />
+          Hide paid{counts.paid > 0 && ` (${counts.paid})`}
+        </label>
+
+        {counts.nothingToPay > 0 && (
+          <label className="flex cursor-pointer items-center gap-1.5" title="Orders where every line was an alteration, an exchange, a store credit or an amount settled elsewhere. Uploads no longer create these.">
+            <input
+              type="checkbox"
+              checked={showNothingToPay}
+              onChange={(e) => setShowNothingToPay(e.target.checked)}
+              className="h-3.5 w-3.5 accent-[#2f6b4f]"
+            />
+            Show {counts.nothingToPay} with nothing to pay
+          </label>
+        )}
+      </div>
+
       {error && (
         <p className="flex items-start gap-3 rounded-lg border border-clay/30 bg-clay-wash px-3 py-2 text-[12.5px] text-clay">
           <span className="flex-1">{error}</span>
@@ -148,7 +231,7 @@ export function Ledger() {
       )}
 
       {!visible.length ? (
-        <Empty filter={filter} hasAny={orders.length > 0} />
+        <Empty filter={filter} hasAny={orders.length > 0} narrowed={Boolean(from || to)} />
       ) : (
         <div className="space-y-5">
           {weeks.map((week) => {
@@ -752,7 +835,29 @@ function Field({ label, value, mono }: { label: string; value: string; mono?: bo
   );
 }
 
-function Empty({ filter, hasAny }: { filter: Filter; hasAny: boolean }) {
+function Empty({
+  filter,
+  hasAny,
+  narrowed,
+}: {
+  filter: Filter;
+  hasAny: boolean;
+  narrowed: boolean;
+}) {
+  // A date range that matches nothing is not the same as an empty ledger, and
+  // telling someone to upload an export when the answer is to widen the dates
+  // sends them off to do the wrong thing.
+  if (narrowed && hasAny) {
+    return (
+      <div className="rounded-card border border-dashed border-line bg-card px-6 py-14 text-center">
+        <p className="display text-[15px] font-semibold text-ink">Nothing in these dates</p>
+        <p className="mx-auto mt-1 max-w-[380px] text-[13px] leading-relaxed text-ink-2">
+          No order was approved in the range you picked. Widen it, or clear the dates to see
+          everything again.
+        </p>
+      </div>
+    );
+  }
   const copy: Record<Filter, string> = {
     pending: "Nothing waiting to be verified. Upload an export, or look at the other tabs.",
     hold: "Nothing on hold.",

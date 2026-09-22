@@ -237,10 +237,21 @@ export function transform(rows: RawRow[], options: TransformOptions = {}): Trans
   }
 
   const orders: PayoutOrder[] = [];
+  let ordersExcluded = 0;
   for (const [orderNumber, entries] of byOrder) {
     const lines = entries.map((e) => e.line);
     const payable = lines.filter((l) => l.payable);
     const skipped = lines.filter((l) => !l.payable);
+
+    // Every line on this order was excluded — an alteration, an exchange, a
+    // store credit, an amount settled against another product. There is
+    // nothing to pay and so nothing to decide, and an order nobody can act on
+    // is not a ledger entry; it is noise that makes the real ones harder to
+    // see. It is counted in the summary so the upload still adds up.
+    if (!payable.length) {
+      ordersExcluded++;
+      continue;
+    }
 
     const upis: string[] = [];
     for (const e of entries) {
@@ -299,6 +310,7 @@ export function transform(rows: RawRow[], options: TransformOptions = {}): Trans
     rowsIn: rows.length,
     linesKept: kept.length,
     orders: orders.length,
+    ordersExcluded,
     ordersPayable: payableOrders.length,
     ordersWithUpi: payableOrders.filter((o) => o.upi).length,
     ordersMissingUpi: payableOrders.filter((o) => !o.upi).length,
@@ -347,6 +359,7 @@ function emptySummary(rowsIn: number): TransformSummary {
     rowsIn,
     linesKept: 0,
     orders: 0,
+    ordersExcluded: 0,
     ordersPayable: 0,
     ordersWithUpi: 0,
     ordersMissingUpi: 0,
